@@ -44,8 +44,22 @@ jobs:
     name: Linux hardening checks
     runs-on: ubuntu-latest
     steps:
-      - name: Check out source
+      - name: Check out required hardening files
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            README.md
+            docs/ALLVM_HARDENING.md
+            build.cpp
+            tools/allvm-doctor.py
+            tools/check-hardening.py
+            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
+            llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
+            llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          sparse-checkout-cone-mode: false
 
       - name: Validate environment doctor entrypoint
         run: |
@@ -65,8 +79,11 @@ jobs:
     name: Windows build helper compile
     runs-on: windows-latest
     steps:
-      - name: Check out source
+      - name: Check out build helper
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: build.cpp
+          sparse-checkout-cone-mode: false
 
       - name: Locate Visual Studio and compile build.cpp
         shell: cmd

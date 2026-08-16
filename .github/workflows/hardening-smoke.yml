@@ -3,23 +3,37 @@ name: Hardening smoke checks
 on:
   pull_request:
     paths:
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
+      - "tools/check-hardening.py"
       - ".github/workflows/hardening-smoke.yml"
   push:
     branches:
       - "hardening/**"
     paths:
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
+      - "tools/check-hardening.py"
       - ".github/workflows/hardening-smoke.yml"
 
 permissions:
   contents: read
+
+concurrency:
+  group: hardening-smoke-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
@@ -28,18 +42,16 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Validate doctor script
+      - name: Validate environment doctor entrypoint
         run: |
           python3 -m py_compile tools/allvm-doctor.py
           python3 tools/allvm-doctor.py --help >/dev/null
 
-      - name: Guard hardened random paths
-        shell: bash
-        run: |
-          ! grep -nE '\b(srand|rand|time)\s*\(' \
-            llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp \
-            llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
-          grep -q 'BCryptGenRandom' \
-            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
-          grep -q '/dev/urandom' \
-            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
+      - name: Run hardening regression checker
+        run: python3 tools/check-hardening.py --compile-header
+
+      - name: Produce machine-readable hardening report
+        run: python3 tools/check-hardening.py --json > hardening-report.json
+
+      - name: Show report
+        run: cat hardening-report.json

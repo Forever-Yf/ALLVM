@@ -85,11 +85,12 @@ jobs:
     name: VMP LLVM syntax checks
     runs-on: ubuntu-latest
     steps:
-      - name: Check out LLVM headers and VMP sources
+      - name: Check out ALLVM custom headers and VMP sources
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            llvm/include/llvm
+            llvm/include/llvm/CryptoUtils.h
+            llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
           sparse-checkout-cone-mode: true
@@ -109,6 +110,14 @@ jobs:
           echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
           "$LLVM_CONFIG" --version
 
+      - name: Build a custom-header overlay
+        shell: bash
+        run: |
+          mkdir -p /tmp/allvm-include/llvm/Transforms /tmp/allvm-include/llvm
+          cp -R llvm/include/llvm/Transforms/Obfuscation \
+            /tmp/allvm-include/llvm/Transforms/
+          cp llvm/include/llvm/CryptoUtils.h /tmp/allvm-include/llvm/CryptoUtils.h
+
       - name: Compile compatibility analysis
         shell: bash
         run: |
@@ -116,10 +125,11 @@ jobs:
           if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
           read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
           "$CXX" \
-            -I"$PWD/llvm/include" \
+            -I/tmp/allvm-include \
             "${LLVM_CXXFLAGS[@]}" \
             -std=c++17 \
             -Wall -Wextra \
+            -Wno-unused-parameter \
             -fsyntax-only \
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
 
@@ -130,7 +140,7 @@ jobs:
           if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
           read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
           "$CXX" \
-            -I"$PWD/llvm/include" \
+            -I/tmp/allvm-include \
             "${LLVM_CXXFLAGS[@]}" \
             -std=c++17 \
             -Wno-unused-function \

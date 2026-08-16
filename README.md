@@ -24,7 +24,8 @@
 - 旧版 VMP 不再使用 `srand(time(0))` 和 `rand()` 生成种子；
 - 修复常量保护 Pass 对 PHI incoming value 的处理和空工作集判断；
 - 新增 `tools/allvm-doctor.py`，可诊断 NDK、构建工具和 16 KiB ELF 对齐；
-- 新增 GitHub Actions 烟雾检查，防止弱随机路径回归。
+- 新增 GitHub Actions 烟雾检查，防止弱随机路径回归；
+- Windows 构建助手支持显式 NDK、环境变量和 SDK side-by-side NDK 发现，默认不会修改原 NDK。
 
 详细设计和后续路线见 [`docs/ALLVM_HARDENING.md`](docs/ALLVM_HARDENING.md)。
 
@@ -52,7 +53,7 @@
 - Android SDK 与 Android NDK；
 - Java 和 ADB 为 Android 测试所需的可选依赖。
 
-LLVM 源码本身可在其他主机上构建，但仓库中的 `build.cpp` 仍包含 Windows 专用路径和批处理调用，尚未完成跨平台重构。
+LLVM 源码本身可在其他主机上构建，但仓库中的 `build.cpp` 仍是 Windows 专用助手。它已移除单一 NDK 和 Visual Studio Enterprise 的硬编码依赖，支持参数、环境变量、Android SDK side-by-side NDK 以及多个 Visual Studio 2022 版本；跨平台构建前端仍属于后续工作。
 
 ## 先运行环境诊断
 
@@ -103,21 +104,56 @@ git switch hardening/p0-secure-seeding-doctor
 
 ### 2. 编译工具链
 
-仓库保留原有 Windows 构建入口：
+先查看构建助手参数：
 
 ```powershell
-.\build.exe
+.\build.exe --help
+```
+
+推荐先运行诊断，再开始构建：
+
+```powershell
+.\build.exe `
+  --ndk D:\Android\Sdk\ndk\29.0.14206865 `
+  --doctor
+```
+
+也可以只诊断环境而不构建：
+
+```powershell
+.\build.exe `
+  --ndk D:\Android\Sdk\ndk\29.0.14206865 `
+  --doctor-only
 ```
 
 也可以从 `build.cpp` 重新生成构建程序：
 
 ```powershell
 cl /std:c++17 /EHsc /utf-8 build.cpp /Fe:build.exe
-.\build.exe
+.\build.exe --ndk D:\Android\Sdk\ndk\29.0.14206865
 ```
 
-> [!WARNING]
-> 当前 `build.cpp` 在完整构建流程末尾仍会调用 `replace_ndk_clang()`：它会先生成 `.bak`，随后把部分 OLLVM 工具复制进所配置的 NDK。请只对专门用于 ALLVM 的 NDK 副本执行该操作，不要直接对日常开发或生产 NDK 运行。后续版本会改为独立 toolchain overlay，默认不修改原 NDK。
+NDK 发现顺序：
+
+```text
+--ndk
+→ ALLVM_NDK
+→ ANDROID_NDK_HOME
+→ ANDROID_NDK_ROOT
+→ ANDROID_SDK_ROOT / ANDROID_HOME 下的 side-by-side NDK
+→ 仓库内旧版兼容目录
+```
+
+> [!NOTE]
+> 构建助手默认不会修改原 NDK。编译完成的工具保留在 `build-windows\bin`。只有显式传入 `--install-into-ndk` 才会把工具复制到 NDK，并在首次复制前创建 `.bak`：
+>
+> ```powershell
+> .\build.exe `
+>   --ndk D:\Android\ALLVM-NDK-COPY `
+>   --install-into-ndk
+> ```
+>
+> 即使使用显式开关，也只应操作专门为 ALLVM 准备的 NDK 副本。完整的独立 toolchain overlay 仍在后续路线中。
 
 ### 3. 编译测试项目
 
@@ -381,7 +417,9 @@ llvm-readelf -lW protected.so
 | `llvm/lib/Transforms/Obfuscation/StringEncryption.cpp` | 字符串保护 |
 | `llvm/lib/Transforms/Obfuscation/aVMP.cpp` | 旧版 VMP 翻译器 |
 | `llvm/lib/Transforms/Obfuscation/ObfuscationPassManager.cpp` | Pass 注册与调度 |
+| `build.cpp` | Windows 构建助手、NDK 发现和显式安装入口 |
 | `tools/allvm-doctor.py` | 环境和 ELF 诊断工具 |
+| `tools/check-hardening.py` | 弱随机、文档和安全默认值回归检查 |
 | `.github/workflows/hardening-smoke.yml` | 加固回归烟雾检查 |
 
 ## 新增 Pass 的基本步骤
@@ -401,7 +439,7 @@ llvm-readelf -lW protected.so
 1. 为字符串记录引入标准 AEAD 格式和明确的明文生命周期；
 2. 为 VMP 字节码增加分块完整性验证和动态容量计算；
 3. 清理密钥、nonce 和内部状态的符号或日志泄漏；
-4. 将 `build.cpp` 改为显式 NDK 参数和独立 toolchain overlay；
+4. 在现有显式 NDK 和安全默认值基础上实现完整的独立 toolchain overlay，彻底取消向 NDK 复制工具；
 5. 修复自定义 ELF 装载器的 16 KiB 页和 W^X；
 6. 增加 LLVM/NDK/ABI 自动化构建矩阵；
 7. 逐步迁移 New Pass Manager 和 out-of-tree 插件结构。

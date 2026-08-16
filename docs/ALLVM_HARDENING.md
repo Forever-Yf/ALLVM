@@ -172,19 +172,37 @@ python3 tools/allvm-doctor.py --json
 
 诊断工具不会修改 NDK。
 
-## 7. 当前自动化验证
+## 7. 构建助手
+
+`build.cpp` 已完成第一轮易用性和环境隔离改造：
+
+- 支持 `--ndk <path>`；
+- 支持 `ALLVM_NDK`、`ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT`；
+- 可从 `ANDROID_SDK_ROOT`、`ANDROID_HOME` 和 Windows 默认 SDK 目录发现 side-by-side NDK；
+- 可识别 Visual Studio 2022 Enterprise、Professional、Community、Build Tools，并使用 `vswhere` 兜底；
+- 支持 `--doctor` 和 `--doctor-only`；
+- 默认把产物保留在 `build-windows\bin`，不会修改原 NDK；
+- 只有显式 `--install-into-ndk` 才执行复制，并为原文件创建 `.bak`；
+- 对目标 triple 和并行任务数进行输入校验。
+
+当前仍是 Windows 专用构建助手，且显式安装模式本质上仍会复制文件。长期方案是独立 toolchain overlay，并通过 CMake、Gradle 或 ndk-build 显式选择编译器。
+
+## 8. 当前自动化验证
 
 `.github/workflows/hardening-smoke.yml` 用于：
 
-- 编译检查 `tools/allvm-doctor.py`；
-- 验证 `--help` 入口；
+- 编译检查 `tools/allvm-doctor.py` 和 `tools/check-hardening.py`；
+- 验证 doctor 的 `--help` 入口；
+- 编译并运行 `SecureRandom.h` 的最小 C++17 烟雾测试；
 - 检查安全随机头文件包含 Windows 与 POSIX 路径；
 - 阻止常量保护、`CryptoUtils` 和旧版 VMP 重新引入弱随机调用；
-- 检查 README 中的确定性种子和安全边界说明。
+- 检查构建助手保持“默认不修改 NDK”；
+- 在 Windows runner 上使用 MSVC 编译 `build.cpp`；
+- 检查中文 README 中的确定性种子、安全默认值和安全边界说明。
 
 这些是烟雾测试，不等价于完整 LLVM 构建。
 
-## 8. 验收标准
+## 9. 验收标准
 
 ### 随机性
 
@@ -212,7 +230,7 @@ python3 tools/allvm-doctor.py --json
 - `-O0`、`-O2`、`-Oz`、LTO/ThinLTO；
 - 递归、并发、JNI、函数指针与虚函数。
 
-## 9. 仍需完成的高优先级改造
+## 10. 仍需完成的高优先级改造
 
 ### P0/P1
 
@@ -222,7 +240,7 @@ python3 tools/allvm-doctor.py --json
 4. 增加不支持 IR 构造的 capability analysis 和跳过报告；
 5. 清理符号、日志、统计数据中的密钥和内部状态；
 6. 修复自定义 ELF 装载器的 16 KiB 页、边界溢出和 W^X；
-7. `build.cpp` 改为显式 NDK 参数和独立 toolchain overlay，默认禁止修改原 NDK。
+7. 在现有显式 NDK 和安全默认值基础上实现完整 toolchain overlay，移除向 NDK 复制工具的兼容模式。
 
 ### P2
 
@@ -232,7 +250,7 @@ python3 tools/allvm-doctor.py --json
 4. 添加体积、编译时间、启动时间和热点开销预算；
 5. 增加产物密钥特征扫描和差分测试。
 
-## 10. 安全结论
+## 11. 安全结论
 
 当前改造显著提升了构建时随机源、种子隔离和错误处理质量，并修复了一个真实的显式种子越界问题。但保护逻辑和解密逻辑仍同时存在于客户端，攻击者在足够权限和时间下仍可观察运行时状态。
 

@@ -2181,6 +2181,7 @@ static bool runVMPOnFunction(Function &F) {
         return false;
     }
 
+    prepareVMPFunction(F);
     GOVMModifier Modifier(&F, Translator.get_gv_value_map(),
                           Translator.get_value_map());
     Modifier.run();
@@ -2208,7 +2209,6 @@ struct VMProtect : public ModulePass {
         continue;
       if (!validateVMPFunction(F))
         continue;
-      prepareVMPFunction(F);
       FunctionsToProcess.push_back(&F);
     }
 
@@ -2241,7 +2241,6 @@ PreservedAnalyses llvm::VMProtectPass::run(Module &M,
       continue;
     if (!validateVMPFunction(F))
       continue;
-    prepareVMPFunction(F);
     FunctionsToProcess.push_back(&F);
   }
 

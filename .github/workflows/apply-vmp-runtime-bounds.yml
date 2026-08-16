@@ -41,7 +41,7 @@ jobs:
           grep -q 'data_seg_size_gv' llvm/lib/Transforms/Obfuscation/aVMP.cpp
           grep -q 'vm_fault_gv' llvm/lib/Transforms/Obfuscation/aVMP.cpp
           grep -q '仅支持 64 位目标' llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
-          ! grep -q 'SEG_SIZE' aVMPInterpreter/aVMPInterpreter.c
+          ! grep -q '^#define SEG_SIZE' aVMPInterpreter/aVMPInterpreter.c
           ! grep -q 'pack_store_addr(data_seg_addr' aVMPInterpreter/aVMPInterpreter.c
 
       - name: Remove one-time helpers

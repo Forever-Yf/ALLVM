@@ -1,7 +1,7 @@
 //===- SecureRandom.h - ALLVM build-time secure seeding -------*- C++ -*-===//
 //
 // Provides a small, dependency-free bridge from the operating system CSPRNG
-// to the existing CryptoUtils AES-CTR generator.  A deterministic build can
+// to the existing CryptoUtils AES-CTR generator. A deterministic build can
 // be requested explicitly with ALLVM_BUILD_SEED; normal builds use fresh OS
 // entropy and domain-separated per-pass seeds.
 //
@@ -137,7 +137,8 @@ inline std::string loadBuildSeedHex() {
 
   std::array<std::uint8_t, 32> RandomBytes{};
   if (!fillFromOs(RandomBytes.data(), RandomBytes.size()))
-    report_fatal_error("ALLVM could not obtain entropy from the operating system");
+    report_fatal_error(
+        "ALLVM could not obtain entropy from the operating system");
 
   std::string Seed = hexEncode(RandomBytes.data(), RandomBytes.size());
   secureZero(RandomBytes.data(), RandomBytes.size());
@@ -151,6 +152,22 @@ inline const std::string &buildSeedHex() {
 
 } // namespace detail
 
+/// Fill a caller-owned buffer from the operating-system CSPRNG.
+inline bool fillSecureRandom(std::uint8_t *Buffer, std::size_t Size) {
+  if (Size == 0)
+    return true;
+  if (Buffer == nullptr)
+    return false;
+  return detail::fillFromOs(Buffer, Size);
+}
+
+/// Clear sensitive bytes through a volatile write loop.
+inline void secureClear(void *Ptr, std::size_t Size) {
+  if (Ptr == nullptr || Size == 0)
+    return;
+  detail::secureZero(Ptr, Size);
+}
+
 inline void seedCryptoUtils(CryptoUtils &Engine, const char *Domain) {
   std::string Material("ALLVM-build-seed-v1|");
   Material += detail::buildSeedHex();
@@ -162,11 +179,11 @@ inline void seedCryptoUtils(CryptoUtils &Engine, const char *Domain) {
     report_fatal_error("ALLVM failed to derive a pass-specific random seed");
 
   std::string DerivedSeed = detail::hexEncode(Digest.data(), 16);
-  detail::secureZero(Digest.data(), Digest.size());
-  detail::secureZero(&Material[0], Material.size());
+  secureClear(Digest.data(), Digest.size());
+  secureClear(&Material[0], Material.size());
 
   Engine.prng_seed(DerivedSeed);
-  detail::secureZero(&DerivedSeed[0], DerivedSeed.size());
+  secureClear(&DerivedSeed[0], DerivedSeed.size());
 }
 
 } // namespace allvm

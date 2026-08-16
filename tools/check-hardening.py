@@ -51,6 +51,7 @@ def static_checks(results: list[Result]) -> None:
     secure = read("llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h")
     constant_int = read("llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp")
     constant_fp = read("llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp")
+    string_pass = read("llvm/lib/Transforms/Obfuscation/StringEncryption.cpp")
     build_helper = read("build.cpp")
     readme = read("README.md")
     hardening_doc = read("docs/ALLVM_HARDENING.md")
@@ -146,6 +147,38 @@ def static_checks(results: list[Result]) -> None:
         else "常量 Pass 域配置缺失",
     )
 
+    string_markers = (
+        'RandomDomain = "string-encryption|"',
+        "seedCryptoUtils(RandomEngine, RandomDomain.c_str())",
+        "RandomEngine.get_range(Span)",
+        "secureClear(Buffer.data(), Buffer.size())",
+        "secureClear(Entry->EncKey.data()",
+        "static_assert(std::is_same_v<T, uint8_t>",
+    )
+    ok, missing = contains_all(string_pass, string_markers)
+    add(
+        results,
+        "字符串 Pass 随机生命周期",
+        ok,
+        "模块域分离、无偏长度和临时缓冲清理存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    raw_string_buffers = [
+        marker
+        for marker in ("new char[Len * sizeof(T)]", "delete[] Buffer")
+        if marker in string_pass
+    ]
+    add(
+        results,
+        "字符串 Pass 裸随机缓冲",
+        not raw_string_buffers,
+        "未发现裸 new[] 临时随机缓冲"
+        if not raw_string_buffers
+        else "仍存在: " + ", ".join(raw_string_buffers),
+    )
+
     build_markers = (
         'get_env("ALLVM_NDK")',
         'get_env("ANDROID_NDK_HOME")',
@@ -153,13 +186,14 @@ def static_checks(results: list[Result]) -> None:
         'arg == "--install-into-ndk"',
         "[SAFE DEFAULT] Original NDK was not modified.",
         'arg == "--doctor-only"',
+        "fopen_s",
     )
     ok, missing = contains_all(build_helper, build_markers)
     add(
         results,
         "构建助手安全默认值",
         ok,
-        "NDK 自动发现、诊断和显式安装开关存在"
+        "NDK 自动发现、诊断、MSVC 安全文件入口和显式安装开关存在"
         if ok
         else "缺少: " + ", ".join(missing),
     )
@@ -168,13 +202,14 @@ def static_checks(results: list[Result]) -> None:
         "static bool replace_ndk_clang()",
         "if (!replace_ndk_clang())",
         'g_ndk_bin = g_script_dir + "\\\\android-ndk-r30-beta1-windows',
+        "std::fopen",
     )
     found_unsafe = [marker for marker in unsafe_build_patterns if marker in build_helper]
     add(
         results,
         "构建助手覆盖 NDK 回归",
         not found_unsafe,
-        "默认流程未发现隐式覆盖 NDK"
+        "默认流程未发现隐式覆盖 NDK 或弃用文件入口"
         if not found_unsafe
         else "仍存在: " + ", ".join(found_unsafe),
     )

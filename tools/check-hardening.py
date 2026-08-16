@@ -2,8 +2,8 @@
 """Run lightweight ALLVM hardening regression checks.
 
 The checker uses only Python's standard library. It verifies that known weak
-random paths have not returned, checks the Chinese documentation, and can
-compile/run SecureRandom.h against minimal LLVM interface stubs.
+random paths have not returned, checks the Chinese documentation and safe build
+helper defaults, and can compile/run SecureRandom.h against minimal LLVM stubs.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import json
 import py_compile
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -52,6 +51,7 @@ def static_checks(results: list[Result]) -> None:
     secure = read("llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h")
     constant_int = read("llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp")
     constant_fp = read("llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp")
+    build_helper = read("build.cpp")
     readme = read("README.md")
     hardening_doc = read("docs/ALLVM_HARDENING.md")
 
@@ -146,11 +146,46 @@ def static_checks(results: list[Result]) -> None:
         else "常量 Pass 域配置缺失",
     )
 
+    build_markers = (
+        'get_env("ALLVM_NDK")',
+        'get_env("ANDROID_NDK_HOME")',
+        "find_side_by_side_ndk",
+        'arg == "--install-into-ndk"',
+        "[SAFE DEFAULT] Original NDK was not modified.",
+        'arg == "--doctor-only"',
+    )
+    ok, missing = contains_all(build_helper, build_markers)
+    add(
+        results,
+        "构建助手安全默认值",
+        ok,
+        "NDK 自动发现、诊断和显式安装开关存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    unsafe_build_patterns = (
+        "static bool replace_ndk_clang()",
+        "if (!replace_ndk_clang())",
+        'g_ndk_bin = g_script_dir + "\\\\android-ndk-r30-beta1-windows',
+    )
+    found_unsafe = [marker for marker in unsafe_build_patterns if marker in build_helper]
+    add(
+        results,
+        "构建助手覆盖 NDK 回归",
+        not found_unsafe,
+        "默认流程未发现隐式覆盖 NDK"
+        if not found_unsafe
+        else "仍存在: " + ", ".join(found_unsafe),
+    )
+
     readme_markers = (
         "ALLVM_BUILD_SEED",
         "安全能力与边界",
         "本加固分支做了什么",
         "16 KiB Android 页支持",
+        "--install-into-ndk",
+        "默认不会修改原 NDK",
         "后续路线",
     )
     ok, missing = contains_all(readme, readme_markers)
@@ -158,7 +193,7 @@ def static_checks(results: list[Result]) -> None:
         results,
         "中文 README",
         ok,
-        "加固、使用和安全边界说明完整"
+        "加固、使用、安全默认值和边界说明完整"
         if ok
         else "缺少: " + ", ".join(missing),
     )
@@ -167,6 +202,7 @@ def static_checks(results: list[Result]) -> None:
         "威胁模型",
         "CryptoUtils 修复",
         "旧版 VMP 随机化",
+        "构建助手",
         "验收标准",
         "仍需完成的高优先级改造",
     )
@@ -175,7 +211,7 @@ def static_checks(results: list[Result]) -> None:
         results,
         "中文加固文档",
         ok,
-        "威胁模型、验证和路线图存在"
+        "威胁模型、构建安全、验证和路线图存在"
         if ok
         else "缺少: " + ", ".join(missing),
     )

@@ -1,0 +1,99 @@
+name: Apply VMP source integration fixes
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/apply-vmp-source-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out affected source
+        uses: actions/checkout@v4
+        with:
+          ref: hardening/p0-secure-seeding-doctor
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/apply-vmp-source-fixes.yml
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Repair declaration order and escaped newlines
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('llvm/lib/Transforms/Obfuscation/aVMP.cpp')
+          text = path.read_text(encoding='utf-8')
+
+          anchor = '''static void resetVMPGlobals() {
+'''
+          declarations = '''extern GlobalVariable *gv_code_seg;
+extern GlobalVariable *gv_data_seg;
+extern GlobalVariable *ip;
+extern GlobalVariable *data_seg_addr;
+extern GlobalVariable *code_seg_addr;
+extern Function *govm_interpreter;
+
+static void resetVMPGlobals() {
+'''
+          if text.count(anchor) != 1:
+              raise SystemExit('resetVMPGlobals anchor is not unique')
+          text = text.replace(anchor, declarations, 1)
+
+          invalid_string = re.compile(r'"([^"\n]*)\n";')
+          matches = invalid_string.findall(text)
+          if len(matches) != 4:
+              raise SystemExit(
+                  f'expected four malformed newline literals, found {len(matches)}: {matches!r}'
+              )
+          text = invalid_string.sub(
+              lambda match: '"' + match.group(1) + r'\n";',
+              text,
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate repaired source markers
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          text = Path('llvm/lib/Transforms/Obfuscation/aVMP.cpp').read_text(encoding='utf-8')
+          if re.search(r'"[^"\n]*\n";', text):
+              raise SystemExit('malformed multiline C++ string literal remains')
+          if text.index('extern GlobalVariable *gv_code_seg;') > text.index('static void resetVMPGlobals()'):
+              raise SystemExit('VMP global declarations still follow reset helper')
+          for marker in (
+              'analyzeVMPFunction',
+              'irobf-vmp-strict',
+              'runVMPOnFunction',
+              'setThreadLocal(true)',
+              'verifyFunction(F, &errs())',
+          ):
+              if marker not in text:
+                  raise SystemExit(f'missing marker: {marker}')
+          PY
+
+      - name: Remove one-time workflow
+        run: git rm .github/workflows/apply-vmp-source-fixes.yml
+
+      - name: Commit source fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          git commit -m "vmp: fix preflight integration source issues"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

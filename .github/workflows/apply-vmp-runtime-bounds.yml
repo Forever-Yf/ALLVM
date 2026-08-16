@@ -27,6 +27,37 @@ jobs:
             tools/_apply_vmp_runtime_bounds.py
           sparse-checkout-cone-mode: false
 
+      - name: Fix helper terminal-opcode replacement
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tools/_apply_vmp_runtime_bounds.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''opcode = replace_once(
+    opcode,
+    "    return 0xFF;\\n",
+    "    vm_set_fault(VM_FAULT_INVALID_OPCODE);\\n"
+    "    return 0xFF;\\n",
+    "opcode terminal fault",
+)
+'''
+          new = '''terminal_return = "    return 0xFF;\\n"
+          if not opcode.endswith(terminal_return + "}"):
+              raise SystemExit("get_opcode terminal return was not found")
+          opcode = (
+              opcode[: -len(terminal_return + "}")]
+              + "    vm_set_fault(VM_FAULT_INVALID_OPCODE);\\n"
+              + terminal_return
+              + "}"
+          )
+'''
+          if text.count(old) != 1:
+              raise SystemExit('terminal opcode helper block is not unique')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Apply exact runtime-bound edits
         run: python3 tools/_apply_vmp_runtime_bounds.py
 

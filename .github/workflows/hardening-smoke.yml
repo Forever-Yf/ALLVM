@@ -7,9 +7,11 @@ on:
       - "docs/ALLVM_HARDENING.md"
       - "build.cpp"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp"
       - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
@@ -23,9 +25,11 @@ on:
       - "docs/ALLVM_HARDENING.md"
       - "build.cpp"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp"
       - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
@@ -54,10 +58,12 @@ jobs:
             tools/allvm-doctor.py
             tools/check-hardening.py
             llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
+            llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
             llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
             llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp
             llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
             llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
           sparse-checkout-cone-mode: false
 
@@ -74,6 +80,66 @@ jobs:
 
       - name: Show report
         run: cat hardening-report.json
+
+  vmp-syntax:
+    name: VMP LLVM syntax checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out LLVM headers and VMP sources
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            llvm/include/llvm
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+          sparse-checkout-cone-mode: true
+
+      - name: Locate the newest installed LLVM toolchain
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then
+            LLVM_CONFIG="$(command -v llvm-config || true)"
+          fi
+          if [ -z "$LLVM_CONFIG" ]; then
+            echo "No installed llvm-config was found" >&2
+            exit 1
+          fi
+          echo "LLVM_CONFIG=$LLVM_CONFIG" >> "$GITHUB_ENV"
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Compile compatibility analysis
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          "$CXX" \
+            -I"$PWD/llvm/include" \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra \
+            -fsyntax-only \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+
+      - name: Compile legacy VMP integration
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          "$CXX" \
+            -I"$PWD/llvm/include" \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wno-unused-function \
+            -Wno-unused-variable \
+            -Wno-unused-but-set-variable \
+            -Wno-sign-compare \
+            -Wno-deprecated-declarations \
+            -fsyntax-only \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
 
   windows-build-helper:
     name: Windows build helper compile

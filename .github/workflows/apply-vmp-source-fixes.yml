@@ -34,17 +34,16 @@ jobs:
           path = Path('llvm/lib/Transforms/Obfuscation/aVMP.cpp')
           text = path.read_text(encoding='utf-8')
 
-          anchor = '''static void resetVMPGlobals() {
-'''
-          declarations = '''extern GlobalVariable *gv_code_seg;
-extern GlobalVariable *gv_data_seg;
-extern GlobalVariable *ip;
-extern GlobalVariable *data_seg_addr;
-extern GlobalVariable *code_seg_addr;
-extern Function *govm_interpreter;
-
-static void resetVMPGlobals() {
-'''
+          anchor = "static void resetVMPGlobals() {\n"
+          declarations = (
+              "extern GlobalVariable *gv_code_seg;\n"
+              "extern GlobalVariable *gv_data_seg;\n"
+              "extern GlobalVariable *ip;\n"
+              "extern GlobalVariable *data_seg_addr;\n"
+              "extern GlobalVariable *code_seg_addr;\n"
+              "extern Function *govm_interpreter;\n\n"
+              "static void resetVMPGlobals() {\n"
+          )
           if text.count(anchor) != 1:
               raise SystemExit('resetVMPGlobals anchor is not unique')
           text = text.replace(anchor, declarations, 1)

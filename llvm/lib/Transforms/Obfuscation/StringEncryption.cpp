@@ -14,6 +14,7 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/Transforms/Obfuscation/StringEncryption.h"
+#include "llvm/Transforms/Obfuscation/SecureRandom.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/IPO/Attributor.h"
@@ -24,10 +25,12 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/CryptoUtils.h"
+#include <algorithm>
+#include <iostream>
 #include <map>
 #include <set>
-#include <iostream>
-#include <algorithm>
+#include <type_traits>
+#include <vector>
 
 #define DEBUG_TYPE "string-encryption"
 
@@ -93,6 +96,10 @@ namespace {
 		 */
 		bool doFinalization(Module &) override {
 			for (CSPEntry *Entry : ConstantStringPool) {
+				allvm::secureClear(Entry->Data.data(), Entry->Data.size() * sizeof(uint8_t));
+				allvm::secureClear(Entry->EncKey.data(), Entry->EncKey.size() * sizeof(uint8_t));
+				allvm::secureClear(Entry->Data16.data(), Entry->Data16.size() * sizeof(uint16_t));
+				allvm::secureClear(Entry->EncKey16.data(), Entry->EncKey16.size() * sizeof(uint16_t));
 				delete (Entry);
 			}
 			for (auto &I : CSUserMap) {
@@ -210,6 +217,10 @@ char StringEncryption::ID = 0;
  */
 bool StringEncryption::runOnModule(Module &M) {
 	if (!isLicenseValidated()) return false;
+
+	std::string RandomDomain = "string-encryption|";
+	RandomDomain += M.getModuleIdentifier();
+	allvm::seedCryptoUtils(RandomEngine, RandomDomain.c_str());
 
 	if (isIRObfuscationDebugEnabled()) {
 		errs() << "[DEBUG] StringEncryption: Starting runOnModule\n";
@@ -454,32 +465,38 @@ bool StringEncryption::runOnModule(Module &M) {
  */
 template <typename T>
 void StringEncryption::getRandomBytes(std::vector<T> &Bytes, uint32_t MinSize, uint32_t MaxSize) {
-	uint32_t N = RandomEngine.get_uint32_t();
-	uint32_t Len;
-
+	static_assert(std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t>,
+	              "StringEncryption only supports byte and UTF-16 key material");
 	assert(MaxSize >= MinSize);
 
-	if (MinSize == MaxSize) {
-		Len = MinSize;
-	} else {
-		Len = MinSize + (N % (MaxSize - MinSize));
+	uint32_t Len = MinSize;
+	if (MaxSize > MinSize) {
+		const uint32_t Span = MaxSize - MinSize + 1;
+		Len += RandomEngine.get_range(Span);
 	}
 
-	char *Buffer = new char[Len * sizeof(T)];
-	RandomEngine.get_bytes(Buffer, Len * sizeof(T));
+	const size_t ByteCount = static_cast<size_t>(Len) * sizeof(T);
+	std::vector<uint8_t> Buffer(ByteCount);
+	if (!Buffer.empty()) {
+		RandomEngine.get_bytes(reinterpret_cast<char *>(Buffer.data()),
+		                       static_cast<int>(Buffer.size()));
+	}
+
+	Bytes.reserve(Bytes.size() + Len);
 	for (uint32_t i = 0; i < Len; ++i) {
 		if constexpr (std::is_same_v<T, uint8_t>) {
-			Bytes.push_back(static_cast<uint8_t>(Buffer[i]));
+			Bytes.push_back(Buffer[i]);
 		} else {
-			uint8_t b0 = static_cast<uint8_t>(Buffer[i * 2]);
-			uint8_t b1 = static_cast<uint8_t>(Buffer[i * 2 + 1]);
-			// little-endian combine
-			uint16_t w = static_cast<uint16_t>(b0 | (b1 << 8));
+			const uint8_t b0 = Buffer[i * 2];
+			const uint8_t b1 = Buffer[i * 2 + 1];
+			const uint16_t w = static_cast<uint16_t>(
+			    static_cast<uint16_t>(b0) |
+			    (static_cast<uint16_t>(b1) << 8));
 			Bytes.push_back(w);
 		}
 	}
 
-	delete[] Buffer;
+	allvm::secureClear(Buffer.data(), Buffer.size());
 }
 
 /**

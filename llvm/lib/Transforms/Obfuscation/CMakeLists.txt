@@ -42,3 +42,8 @@ add_llvm_library(LLVMObfuscation
   )
 
 add_dependencies(LLVMObfuscation intrinsics_gen LLVMLinker)
+
+if(WIN32)
+  # SecureRandom.h uses the Windows CNG system-preferred random provider.
+  target_link_libraries(LLVMObfuscation PRIVATE bcrypt)
+endif()

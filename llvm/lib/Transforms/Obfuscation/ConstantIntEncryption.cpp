@@ -15,6 +15,7 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/Transforms/Obfuscation/ConstantIntEncryption.h"
+#include "llvm/Transforms/Obfuscation/SecureRandom.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/IPO/Attributor.h"
@@ -27,10 +28,11 @@
 #include "llvm/CryptoUtils.h"
 #include "llvm/IR/NoFolder.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <algorithm>
+#include <iostream>
 #include <map>
 #include <set>
-#include <iostream>
-#include <algorithm>
+#include <unordered_map>
 
 #define DEBUG_TYPE "constant-int-encryption"
 
@@ -52,6 +54,7 @@ struct ConstantIntEncryption : public FunctionPass {
    */
   ConstantIntEncryption(ObfuscationOptions *argsOptions) : FunctionPass(ID) {
     this->ArgsOptions = argsOptions;
+    allvm::seedCryptoUtils(RandomEngine, "constant-int");
   }
 
   /**
@@ -86,7 +89,9 @@ struct ConstantIntEncryption : public FunctionPass {
           auto GEP = dyn_cast<GetElementPtrInst>(&I);
           auto PHI = dyn_cast<PHINode>(&I);
 
-          for (unsigned i = 0; i < (PHI ? PHI->getNumIncomingValues() : I.getNumOperands()); ++i) {
+          const unsigned OperandCount =
+              PHI ? PHI->getNumIncomingValues() : I.getNumOperands();
+          for (unsigned i = 0; i < OperandCount; ++i) {
             if (CI && CI->isBundleOperand(i)) {
               continue;
             }
@@ -125,7 +130,7 @@ struct ConstantIntEncryption : public FunctionPass {
       return false;
     }
     auto& FuncModifyIRs = FunctionModifyIRs[&F];
-    if (FunctionModifyIRs.empty()) {
+    if (FuncModifyIRs.empty()) {
       return false;
     }
 
@@ -134,14 +139,16 @@ struct ConstantIntEncryption : public FunctionPass {
       auto GEP = dyn_cast<GetElementPtrInst>(I);
       auto PHI = dyn_cast<PHINode>(I);
 
-      for (unsigned i = 0; i < I->getNumOperands(); ++i) {
+      const unsigned OperandCount =
+          PHI ? PHI->getNumIncomingValues() : I->getNumOperands();
+      for (unsigned i = 0; i < OperandCount; ++i) {
         if (CI && CI->isBundleOperand(i)) {
           continue;
         }
         if (GEP && i < 2) {
           continue;
         }
-        Value* Opr = I->getOperand(i);
+        Value* Opr = PHI ? PHI->getIncomingValue(i) : I->getOperand(i);
         if (auto CTI = dyn_cast<ConstantInt>(Opr)) {
           if (CTI->getBitWidth() < 4) {
             continue;

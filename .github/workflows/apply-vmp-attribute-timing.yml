@@ -46,14 +46,24 @@ jobs:
               raise SystemExit('modifier insertion point is not unique')
           text = text.replace(old, new, 1)
 
-          eager = (
+          legacy = (
               '      prepareVMPFunction(F);\n'
               '      FunctionsToProcess.push_back(&F);\n'
           )
-          count = text.count(eager)
-          if count != 2:
-              raise SystemExit(f'expected two eager attribute sites, found {count}')
-          text = text.replace(eager, '      FunctionsToProcess.push_back(&F);\n')
+          modern = (
+              '    prepareVMPFunction(F);\n'
+              '    FunctionsToProcess.push_back(&F);\n'
+          )
+          if text.count(legacy) != 1:
+              raise SystemExit('legacy eager attribute site is not unique')
+          if text.count(modern) != 1:
+              raise SystemExit('new-PM eager attribute site is not unique')
+          text = text.replace(
+              legacy, '      FunctionsToProcess.push_back(&F);\n', 1
+          )
+          text = text.replace(
+              modern, '    FunctionsToProcess.push_back(&F);\n', 1
+          )
 
           path.write_text(text, encoding='utf-8')
           PY

@@ -52,6 +52,9 @@ def static_checks(results: list[Result]) -> None:
     constant_int = read("llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp")
     constant_fp = read("llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp")
     string_pass = read("llvm/lib/Transforms/Obfuscation/StringEncryption.cpp")
+    vmp_header = read("llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h")
+    vmp_preflight = read("llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp")
+    vmp_smoke = read("tools/vmp-compatibility-smoke.cpp")
     build_helper = read("build.cpp")
     readme = read("README.md")
     hardening_doc = read("docs/ALLVM_HARDENING.md")
@@ -114,6 +117,126 @@ def static_checks(results: list[Result]) -> None:
         "VMP 函数级域分离",
         ok,
         "模块和函数域分离存在" if ok else "缺少: " + ", ".join(missing),
+    )
+
+
+    vmp_limit_markers = (
+        "uint64_t MaxBasicBlocks = 4096",
+        "uint64_t MaxInstructions = 50000",
+        "MaxCodeBytes = 16ULL * 1024ULL * 1024ULL",
+        "MaxDataBytes = 16ULL * 1024ULL * 1024ULL",
+        "analyzeVMPFunction",
+    )
+    ok, missing = contains_all(vmp_header, vmp_limit_markers)
+    add(
+        results,
+        "VMP 默认资源限制",
+        ok,
+        "基本块、指令、代码和数据默认阈值存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    vmp_preflight_markers = (
+        "PHI 节点",
+        "原子指令",
+        "直接递归",
+        "可变参数调用",
+        "undef/poison",
+        "getStructLayout",
+        "MaxBasicBlocks",
+        "MaxInstructions",
+        "MaxCodeBytes",
+        "MaxDataBytes",
+    )
+    ok, missing = contains_all(vmp_preflight, vmp_preflight_markers)
+    add(
+        results,
+        "VMP 兼容性预检",
+        ok,
+        "危险 IR、递归、ABI 和资源边界检查存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    vmp_integration_markers = (
+        "irobf-vmp-max-bbs",
+        "irobf-vmp-max-instructions",
+        "irobf-vmp-max-code-bytes",
+        "irobf-vmp-max-data-bytes",
+        "irobf-vmp-strict",
+        "analyzeVMPFunction",
+        "checkActualResourceUsage",
+        "setThreadLocal(true)",
+        "verifyFunction(F, &errs())",
+        "isa<ConstantPointerNull>(value)",
+    )
+    ok, missing = contains_all(avmp, vmp_integration_markers)
+    add(
+        results,
+        "VMP 转换器防护",
+        ok,
+        "预检、实际资源检查、TLS 状态和 IR verifier 已接入"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    obsolete_vmp_markers = [
+        marker
+        for marker in ("#define VM_CODE_SEG_SIZE", "MAX_BASIC_BLOCKS")
+        if marker in avmp
+    ]
+    add(
+        results,
+        "VMP 固定容量回归",
+        not obsolete_vmp_markers,
+        "未发现旧固定代码段或硬编码基本块上限"
+        if not obsolete_vmp_markers
+        else "仍存在: " + ", ".join(obsolete_vmp_markers),
+    )
+
+    timing_ok = avmp.count("prepareVMPFunction(F);") == 1
+    if timing_ok:
+        required_positions = (
+            "if (!Interpreter.run())",
+            "prepareVMPFunction(F);",
+            "GOVMModifier Modifier",
+        )
+        if all(marker in avmp for marker in required_positions):
+            timing_ok = (
+                avmp.index(required_positions[0])
+                < avmp.index(required_positions[1])
+                < avmp.index(required_positions[2])
+            )
+        else:
+            timing_ok = False
+    add(
+        results,
+        "VMP 函数属性时机",
+        timing_ok,
+        "仅在翻译器和解释器成功后添加 noinline/optnone"
+        if timing_ok
+        else "VMP 属性可能污染跳过或失败的函数",
+    )
+
+    vmp_smoke_markers = (
+        'getFunction("supported")',
+        'getFunction("padded_gep")',
+        'getFunction("with_phi")',
+        'getFunction("atomic_load")',
+        'getFunction("recursive")',
+        'getFunction("variadic_call")',
+        'getFunction("undef_value")',
+        "TightLimits.MaxInstructions = 1",
+    )
+    ok, missing = contains_all(vmp_smoke, vmp_smoke_markers)
+    add(
+        results,
+        "VMP IR 行为测试",
+        ok,
+        "支持、拒绝和资源超限场景均有可执行测试"
+        if ok
+        else "缺少: " + ", ".join(missing),
     )
 
     required_secure = (
@@ -221,6 +344,9 @@ def static_checks(results: list[Result]) -> None:
         "16 KiB Android 页支持",
         "--install-into-ndk",
         "默认不会修改原 NDK",
+        "VMP 兼容性预检",
+        "-irobf-vmp-strict",
+        "-irobf-vmp-max-code-bytes",
         "后续路线",
     )
     ok, missing = contains_all(readme, readme_markers)
@@ -237,6 +363,8 @@ def static_checks(results: list[Result]) -> None:
         "威胁模型",
         "CryptoUtils 修复",
         "旧版 VMP 随机化",
+        "VMP 兼容性预检",
+        "VMPResourceLimits",
         "构建助手",
         "验收标准",
         "仍需完成的高优先级改造",

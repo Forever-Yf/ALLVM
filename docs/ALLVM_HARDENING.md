@@ -135,26 +135,102 @@ const uint32_t Threshold = static_cast<uint32_t>(-max) % max;
 
 这些改动改善的是构建随机性、可复现性和编译期敏感数据生命周期。现有字符串记录仍使用自定义可逆变换，密钥与密文共同存放在二进制中，也没有认证标签，因此不能称为 AEAD；标准认证加密仍是后续独立改造。
 
-## 5. 旧版 VMP 随机化
+## 5. 旧版 VMP 随机化与兼容性预检
 
-旧版 `aVMP.cpp` 原先：
+### 5.1 函数级随机域
+
+旧版 `aVMP.cpp` 原先使用：
 
 ```cpp
 srand(time(0));
 xorshift32_seed ^= rand();
 ```
 
-同一秒内的构建容易产生相关种子，也难以在不同函数之间建立稳定隔离。
-
-现在每个翻译器按以下域派生独立 `CryptoUtils`：
+同一秒内的构建容易产生相关种子，也难以在不同函数之间建立稳定隔离。现在每个翻译器按以下域派生独立 `CryptoUtils`：
 
 ```text
 legacy-vmp | ModuleIdentifier | FunctionName
 ```
 
-随后从该实例取得非零 32 位种子，保证 xorshift 状态不会以零启动。
+随后取得非零 32 位种子，保证 xorshift 状态不会以零启动。该改动只改善种子质量和隔离；xorshift 仍是可逆混淆，不是 AEAD。
 
-需要明确：这只改善**种子质量和函数级隔离**。现有 xorshift 字节流仍是可逆混淆，不是 AEAD，也不能检测字节码篡改。
+### 5.2 VMP 兼容性预检
+
+新增：
+
+```text
+llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
+llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+```
+
+`analyzeVMPFunction()` 在创建 helper、导入解释器或改写目标函数前执行，不修改 IR。分析结果包含：
+
+- 是否支持；
+- 基本块和指令数量；
+- ConstantExpr 数量；
+- 估算代码和数据字节数；
+- 最多 16 条去重后的拒绝原因。
+
+预检按当前 uint64 解释器的真实能力保守放行：至多 64 位整数、普通地址空间指针、`float/double`、简单内存操作、受支持算术、无符号比较、简单 GEP、普通 C 调用、分支、switch 和返回。
+
+预检明确拒绝：
+
+- PHI、`select`、浮点比较、有符号比较；
+- 向量、聚合值、超过 64 位整数、`undef/poison`；
+- 动态/数组 alloca、atomic/volatile、`va_arg`；
+- exception personality、`invoke`、EH pad、`callbr`、`indirectbr`；
+- inline asm、`musttail`、operand bundle、非 C 调用约定；
+- byval/sret/inalloca/preallocated 参数；
+- 可变参数调用、直接递归；
+- 超出资源预算的函数。
+
+结构体 GEP 不再手工累加字段大小，而是使用 `DataLayout::getStructLayout()` 和 `getElementOffset()`，因此能够包含 ABI padding。
+
+### 5.3 资源阈值和严格模式
+
+`VMPResourceLimits` 默认值：
+
+| 资源 | 默认值 |
+|---|---:|
+| 基本块 | 4096 |
+| 指令 | 50000 |
+| 估算/实际代码 | 16 MiB |
+| 估算/实际数据 | 16 MiB |
+
+命令行对应：
+
+```text
+-irobf-vmp-max-bbs
+-irobf-vmp-max-instructions
+-irobf-vmp-max-code-bytes
+-irobf-vmp-max-data-bytes
+-irobf-vmp-strict
+```
+
+数值设为 0 可关闭该项阈值。默认模式会跳过并报告不兼容函数；严格模式通过 `report_fatal_error` 终止构建，适合 CI 和发布管线。
+
+翻译器还会检查实际 `vm_code`、数据偏移、32 位 IP 范围以及 branch/switch patch 边界。旧的固定 code/data 宏和 4096 基本块静默返回路径已经移除。
+
+### 5.4 失败副作用和并发状态
+
+- 只有 translator 与嵌入解释器都成功后，才添加 `noinline/optnone` 并运行 modifier；
+- modifier 完成后调用 `verifyFunction()`，无效 IR 立即终止；
+- 每函数的 IP、数据区地址、数据区和 xorshift 状态使用 TLS，改善多线程并发隔离；
+- 直接递归提前拒绝，互递归和间接递归仍不能完全静态识别；
+- ConstantExpr 在翻译时会被物化为等价指令，极晚期失败时尚未实现完整 IR 事务回滚；
+- VM 内部栈和调用栈的完整动态预算仍是后续工作。
+
+### 5.5 可执行行为测试
+
+`tools/vmp-compatibility-smoke.cpp` 使用 LLVM AsmParser 解析真实 IR，验证：
+
+- 普通标量控制流、空指针和含 padding 的结构体 GEP被接受；
+- PHI、atomic、signed compare、直接递归、可变参数调用、`undef` 和动态 alloca 被拒绝；
+- 指令上限可触发资源拒绝。
+
+CI 同时对 `VMPCompatibility.cpp` 和集成后的 `aVMP.cpp` 执行实际 C++/LLVM 语法编译。
+
+需要明确：兼容性预检和资源预算不能替代 VMP 字节码认证。现有字节流仍无篡改标签。
 
 ## 6. 环境诊断
 
@@ -208,6 +284,8 @@ python3 tools/allvm-doctor.py --json
 - 编译检查 `tools/allvm-doctor.py` 和 `tools/check-hardening.py`；
 - 验证 doctor 的 `--help` 入口；
 - 编译并运行 `SecureRandom.h` 的最小 C++17 烟雾测试；
+- 使用同一套 LLVM 头文件分别编译 `VMPCompatibility.cpp` 和 `aVMP.cpp`；
+- 构建并运行解析真实 IR 的 VMP 兼容性行为测试；
 - 检查安全随机头文件包含 Windows 与 POSIX 路径；
 - 阻止常量保护、`CryptoUtils` 和旧版 VMP 重新引入弱随机调用；
 - 检查构建助手保持“默认不修改 NDK”；
@@ -250,8 +328,8 @@ python3 tools/allvm-doctor.py --json
 
 1. 字符串记录改为标准 AEAD，并定义缓存、TLS 和调用期明文生命周期；
 2. VMP 字节码增加分块完整性标签；
-3. 动态计算 VM code/data/stack 容量，替代固定 5000 字节；
-4. 增加不支持 IR 构造的 capability analysis 和跳过报告；
+3. 在已动态化 code/data 缓冲并加入资源预检的基础上，继续动态化 VM 内部栈和调用栈；
+4. 扩展 capability analysis 覆盖面、互递归检测和机器可读跳过报告；
 5. 清理符号、日志、统计数据中的密钥和内部状态；
 6. 修复自定义 ELF 装载器的 16 KiB 页、边界溢出和 W^X；
 7. 在现有显式 NDK 和安全默认值基础上实现完整 toolchain overlay，移除向 NDK 复制工具的兼容模式。

@@ -23,6 +23,7 @@
 - 常量整数、常量浮点、字符串保护和旧版 VMP 使用彼此独立的随机域；
 - 字符串保护按模块派生随机序列，使用无偏长度选择，并清理编译期临时密钥缓冲；
 - 旧版 VMP 不再使用 `srand(time(0))` 和 `rand()` 生成种子；
+- 新增 VMP 兼容性预检、可配置资源阈值、严格失败模式、实际容量检查与 IR verifier；
 - 修复常量保护 Pass 对 PHI incoming value 的处理和空工作集判断；
 - 新增 `tools/allvm-doctor.py`，可诊断 NDK、构建工具和 16 KiB ELF 对齐；
 - 新增 GitHub Actions 烟雾检查，防止弱随机路径回归；
@@ -36,7 +37,7 @@
 |---|---|---|
 | 常量整数/浮点保护 | 使用构建级安全随机根并按 Pass 分离 | 主要用于隐藏和增加分析成本，不等同于服务端秘密管理 |
 | 字符串保护 | 按模块分离随机域、无偏选择密钥长度，并清理编译期临时缓冲 | 现有记录格式仍是自定义可逆变换，密钥与密文同驻二进制，尚无标准 AEAD 完整性标签 |
-| 旧版 VMP | 按模块和函数派生不可预测种子 | 字节码仍使用 xorshift 类可逆流，尚未实现认证加密 |
+| 旧版 VMP | 按模块和函数派生种子；转换前检查 IR/ABI/资源；运行状态使用 TLS；转换后运行 IR verifier | 字节码仍使用 xorshift 可逆流且没有认证标签；互递归和间接递归仍不能完全静态证明安全 |
 | 控制流平坦化 | 改变基本块调度结构 | 可能增加体积、寄存器压力和编译时间 |
 | 间接调用/跳转 | 隐藏直接调用与分支关系 | 对异常、内联汇编和特殊控制流需充分回归 |
 | Syscall Protect | ARM64 下将部分 libc 调用替换为直接系统调用 | 与 Android 版本、ABI 和 seccomp 策略相关，不适合无条件全开 |
@@ -267,6 +268,8 @@ LOCAL_CFLAGS += -mllvm -level-indbr=3
 
 # 仅对带 annotate("vmp") 的函数虚拟化
 LOCAL_CFLAGS += -mllvm -irobf-vmp
+# CI/发布构建可启用严格模式：不兼容函数直接使构建失败
+LOCAL_CFLAGS += -mllvm -irobf-vmp-strict
 LOCAL_CFLAGS += -frtti -fno-exceptions
 ```
 
@@ -283,15 +286,39 @@ int VMP_PROTECT verify_license(const char *token, int length) {
 }
 ```
 
-当前旧版 VMP 的已知边界：
+### VMP 兼容性预检
 
-- 仍使用固定的 VM code/data segment 容量；
-- xorshift 仍是可逆混淆流，不是经过认证的密码算法；
-- 对异常处理、协程、`callbr`、复杂内联汇编、动态栈分配和特殊 ABI 需要单独测试；
-- 修改字节码后尚无统一认证标签；
-- 递归和并发调用需要应用侧专项回归。
+启用 `-irobf-vmp` 后，每个带 `annotate("vmp")` 的函数会先经过**不修改 IR 的预检**。默认行为是跳过不兼容函数，并逐条输出原因；启用 `-irobf-vmp-strict` 后，任何不兼容函数都会使编译立即失败，适合 CI 和发布构建。
 
-因此，本阶段改进解决的是**种子不可预测性和跨函数隔离**，并不宣称 VMP 字节码已达到认证加密等级。
+当前默认资源阈值：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `-mllvm -irobf-vmp-max-bbs=N` | `4096` | 单个函数允许的最大基本块数 |
+| `-mllvm -irobf-vmp-max-instructions=N` | `50000` | 单个函数允许的最大指令数 |
+| `-mllvm -irobf-vmp-max-code-bytes=N` | `16777216` | 估算和实际 VM 字节码上限，16 MiB |
+| `-mllvm -irobf-vmp-max-data-bytes=N` | `16777216` | 估算和实际 VM 数据区上限，16 MiB |
+| `-mllvm -irobf-vmp-strict` | 关闭 | 不再跳过，而是对不兼容函数直接报错 |
+
+数值限制设为 `0` 表示关闭对应阈值，但通常不建议在不受信任或自动生成的 IR 上这样做。
+
+当前预检允许的核心子集包括：不超过 64 位的整数、普通地址空间指针、`float/double`、简单 `alloca/load/store`、受支持算术、无符号整数比较、简单 GEP、C 调用约定下的普通调用、`br/switch/ret`。结构体 GEP 使用 LLVM `StructLayout` 计算真实 padding 后偏移。
+
+以下构造会在转换前被拒绝并给出原因：
+
+- PHI、`select`、浮点比较、有符号比较和当前未实现的 opcode；
+- 向量、聚合值、超过 64 位的整数、`undef/poison`；
+- 动态或数组 `alloca`、atomic/volatile、`va_arg`；
+- exception personality、`invoke`、landing pad、`callbr`、`indirectbr`；
+- inline asm、`musttail`、operand bundle、非 C 调用约定和特殊 ABI 参数属性；
+- 可变参数调用和直接递归；
+- 超出基本块、指令、代码或数据预算的函数。
+
+代码和数据缓冲区现按实际翻译结果动态创建，并在翻译期间再次检查实际大小及跳转补丁边界。只有翻译器和嵌入解释器都成功后，才为目标函数添加 `noinline/optnone` 并改写函数体；失败或跳过不会留下这些属性。
+
+每个受保护函数的可变运行状态被放入线程局部存储，改善不同线程同时调用的隔离性。**直接递归会被拒绝**；互递归和间接递归仍无法完全静态识别，应避免用于 VMP 函数。VM 内部栈和调用栈的完整动态预算仍属于后续工作。
+
+需要明确：xorshift 字节流仍只是可逆混淆，不是 AEAD，修改 VM 字节码也尚无统一认证标签。预检解决的是语义兼容性、资源失控和静默错误，不等于密码学完整性保护。
 
 ## 参数速查
 
@@ -320,6 +347,11 @@ int VMP_PROTECT verify_license(const char *token, int length) {
 | `-mllvm -level-cfe=1..3` | 浮点常量保护强度 |
 | `-mllvm -irobf-rtti` | Microsoft RTTI 信息擦除 |
 | `-mllvm -irobf-vmp` | VMP 虚拟机保护 |
+| `-mllvm -irobf-vmp-max-bbs=N` | VMP 基本块上限；默认 4096，0 表示关闭 |
+| `-mllvm -irobf-vmp-max-instructions=N` | VMP 指令上限；默认 50000，0 表示关闭 |
+| `-mllvm -irobf-vmp-max-code-bytes=N` | VMP 代码预算；默认 16 MiB，0 表示关闭 |
+| `-mllvm -irobf-vmp-max-data-bytes=N` | VMP 数据预算；默认 16 MiB，0 表示关闭 |
+| `-mllvm -irobf-vmp-strict` | 不兼容 VMP 函数直接使构建失败 |
 
 ### 运行时检测
 
@@ -417,11 +449,14 @@ llvm-readelf -lW protected.so
 | `llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp` | 整数常量保护 |
 | `llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp` | 浮点常量保护 |
 | `llvm/lib/Transforms/Obfuscation/StringEncryption.cpp` | 字符串保护 |
-| `llvm/lib/Transforms/Obfuscation/aVMP.cpp` | 旧版 VMP 翻译器 |
+| `llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h` | VMP 预检结果和资源限制接口 |
+| `llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp` | VMP IR/ABI/资源兼容性分析 |
+| `llvm/lib/Transforms/Obfuscation/aVMP.cpp` | 旧版 VMP 翻译器及预检接入 |
 | `llvm/lib/Transforms/Obfuscation/ObfuscationPassManager.cpp` | Pass 注册与调度 |
 | `build.cpp` | Windows 构建助手、NDK 发现和显式安装入口 |
 | `tools/allvm-doctor.py` | 环境和 ELF 诊断工具 |
-| `tools/check-hardening.py` | 弱随机、文档和安全默认值回归检查 |
+| `tools/check-hardening.py` | 弱随机、VMP 预检、文档和安全默认值回归检查 |
+| `tools/vmp-compatibility-smoke.cpp` | 解析真实 IR 的 VMP 兼容性行为测试 |
 | `.github/workflows/hardening-smoke.yml` | 加固回归烟雾检查 |
 
 ## 新增 Pass 的基本步骤
@@ -439,7 +474,7 @@ llvm-readelf -lW protected.so
 当前优先级：
 
 1. 为字符串记录引入标准 AEAD 格式和明确的明文生命周期；
-2. 为 VMP 字节码增加分块完整性验证和动态容量计算；
+2. 为 VMP 字节码增加分块完整性验证，并继续动态化 VM 内部栈和调用栈预算；
 3. 清理密钥、nonce 和内部状态的符号或日志泄漏；
 4. 在现有显式 NDK 和安全默认值基础上实现完整的独立 toolchain overlay，彻底取消向 NDK 复制工具；
 5. 修复自定义 ELF 装载器的 16 KiB 页和 W^X；

@@ -573,7 +573,8 @@ class GOVMTranslator {
             std::vector<uint8_t> res;
             std::vector<uint8_t> packed;
             std::vector<uint8_t> packType = type_to_hex(value->getType());
-            if(ConstantData* CD = dyn_cast<ConstantData>(value)){
+            if (isa<ConstantData>(value) ||
+                isa<ConstantPointerNull>(value)) {
                 packed = pack_const_value(value);
             }
             else{

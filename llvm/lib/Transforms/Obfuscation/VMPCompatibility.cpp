@@ -296,9 +296,12 @@ bool supportedConstant(const DataLayout &DL, const Constant &C,
     Reason = "不是 float/double 的浮点常量";
     return false;
   }
-  if (isa<ConstantPointerNull>(&C) || isa<UndefValue>(&C) ||
-      isa<PoisonValue>(&C))
+  if (isa<ConstantPointerNull>(&C))
     return true;
+  if (isa<UndefValue>(&C) || isa<PoisonValue>(&C)) {
+    Reason = "undef/poison 值不能在 VMP 中稳定具体化";
+    return false;
+  }
 
   Reason = "当前 pack_const_value 不支持的常量种类";
   return false;
@@ -591,6 +594,8 @@ analyzeVMPFunction(const Function &F, const VMPResourceLimits &Limits) {
           reject(Result, "带 operand bundle 的调用");
         if (Call->getCallingConv() != CallingConv::C)
           reject(Result, "使用非 C 调用约定的调用");
+        if (Call->getFunctionType()->isVarArg())
+          reject(Result, "可变参数调用不受旧版 VM ABI 支持");
         if (Call->hasFnAttr(Attribute::ReturnsTwice))
           reject(Result, "returns_twice 调用");
         if (Call->getCalledFunction() == &F)

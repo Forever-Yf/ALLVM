@@ -121,6 +121,13 @@ static void prepareVMPFunction(Function &F) {
     F.addFnAttr(Attribute::OptimizeNone);
 }
 
+extern GlobalVariable *gv_code_seg;
+extern GlobalVariable *gv_data_seg;
+extern GlobalVariable *ip;
+extern GlobalVariable *data_seg_addr;
+extern GlobalVariable *code_seg_addr;
+extern Function *govm_interpreter;
+
 static void resetVMPGlobals() {
     govm_interpreter = nullptr;
     gv_code_seg = nullptr;
@@ -2159,8 +2166,7 @@ static bool runVMPOnFunction(Function &F) {
     GOVMTranslator Translator(&F, Limits);
     if (!Translator.run()) {
         errs() << "[VMP] Translation failed for '" << F.getName()
-               << "': " << Translator.getTranslationError() << "
-";
+               << "': " << Translator.getTranslationError() << "\n";
         cleanupFailedVMP(Translator);
         return false;
     }
@@ -2168,8 +2174,7 @@ static bool runVMPOnFunction(Function &F) {
     GOVMInterpreter Interpreter(&F, Translator.get_callinst_handler());
     if (!Interpreter.run()) {
         errs() << "[VMP] Embedded interpreter setup failed for '"
-               << F.getName() << "'
-";
+               << F.getName() << "'\n";
         cleanupFailedVMP(Translator, &Interpreter);
         return false;
     }
@@ -2206,13 +2211,11 @@ struct VMProtect : public ModulePass {
 
     bool Changed = false;
     for (Function *F : FunctionsToProcess) {
-      errs() << "[VMP] Processing function: " << F->getName() << "
-";
+      errs() << "[VMP] Processing function: " << F->getName() << "\n";
       if (runVMPOnFunction(*F)) {
         Changed = true;
         if (isIRObfuscationDebugEnabled())
-          errs() << "[VMP] Function done: " << F->getName() << "
-";
+          errs() << "[VMP] Function done: " << F->getName() << "\n";
       }
     }
     return Changed;

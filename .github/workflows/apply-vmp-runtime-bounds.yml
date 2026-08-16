@@ -1,0 +1,59 @@
+name: Apply VMP interpreter runtime bounds
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/apply-vmp-runtime-bounds.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out runtime sources and patch helper
+        uses: actions/checkout@v4
+        with:
+          ref: hardening/p0-secure-seeding-doctor
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/apply-vmp-runtime-bounds.yml
+            aVMPInterpreter/aVMPInterpreter.c
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+            tools/_apply_vmp_runtime_bounds.py
+          sparse-checkout-cone-mode: false
+
+      - name: Apply exact runtime-bound edits
+        run: python3 tools/_apply_vmp_runtime_bounds.py
+
+      - name: Validate runtime-bound markers
+        shell: bash
+        run: |
+          grep -q 'VM_FAULT_CODE_RANGE' aVMPInterpreter/aVMPInterpreter.c
+          grep -q 'code_seg_size_gv' llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          grep -q 'data_seg_size_gv' llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          grep -q 'vm_fault_gv' llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          grep -q '仅支持 64 位目标' llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+          ! grep -q 'SEG_SIZE' aVMPInterpreter/aVMPInterpreter.c
+          ! grep -q 'pack_store_addr(data_seg_addr' aVMPInterpreter/aVMPInterpreter.c
+
+      - name: Remove one-time helpers
+        run: |
+          git rm .github/workflows/apply-vmp-runtime-bounds.yml
+          git rm tools/_apply_vmp_runtime_bounds.py
+
+      - name: Commit runtime bounds
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            aVMPInterpreter/aVMPInterpreter.c \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          git commit -m "vmp: add interpreter segment bounds and fail-closed faults"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

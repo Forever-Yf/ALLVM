@@ -109,8 +109,8 @@ static bool validateVMPFunction(Function &F) {
 
     if (VMPStrictCompatibility) {
         report_fatal_error(
-            (Twine("legacy VMP compatibility check failed for '") +
-             F.getName() + "'").str());
+            Twine("legacy VMP compatibility check failed for '") +
+            F.getName() + "'");
     }
     return false;
 }
@@ -546,8 +546,9 @@ class GOVMTranslator {
             }
 
             if (!handled) {
-                failTranslation(Twine("unsupported constant value: ") +
-                                Twine(*const_value));
+                failTranslation(
+                    Twine("unsupported constant value in function '") +
+                    F->getName() + "'");
                 value = 0;
             }
 
@@ -591,8 +592,9 @@ class GOVMTranslator {
                         curr_data_offset += res_size;
                     }
                     else {
-                        failTranslation(Twine("value is missing from VMP data map: ") +
-                                        Twine(*value));
+                        failTranslation(
+                            Twine("value is missing from VMP data map in function '") +
+                            F->getName() + "'");
                         return {};
                     }
                 }
@@ -2184,7 +2186,8 @@ static bool runVMPOnFunction(Function &F) {
     Modifier.run();
     if (verifyFunction(F, &errs()))
         report_fatal_error(
-            (Twine("legacy VMP produced invalid IR for '") + F.getName() + "'").str());
+            Twine("legacy VMP produced invalid IR for '") +
+            F.getName() + "'");
     return true;
 }
 

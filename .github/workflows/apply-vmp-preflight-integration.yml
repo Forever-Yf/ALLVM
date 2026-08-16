@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: hardening/p0-secure-seeding-doctor
-          fetch-depth: 3
+          fetch-depth: 4
           sparse-checkout: |
             .github/workflows/apply-vmp-preflight-integration.yml
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
@@ -33,7 +33,7 @@ jobs:
 
           marker = "          python3 - <<'PY'"
           source = None
-          for revision in ('HEAD^', 'HEAD^^'):
+          for revision in ('HEAD^', 'HEAD^^', 'HEAD^^^'):
               try:
                   candidate = subprocess.check_output(
                       ['git', 'show', f'{revision}:.github/workflows/apply-vmp-preflight-integration.yml'],
@@ -41,7 +41,7 @@ jobs:
                   ).splitlines()
               except subprocess.CalledProcessError:
                   continue
-              if marker in candidate:
+              if marker in candidate and any('def replace_once' in line for line in candidate):
                   source = candidate
                   break
 

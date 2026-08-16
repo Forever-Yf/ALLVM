@@ -3,7 +3,8 @@ from pathlib import Path
 
 path = Path("tools/_apply_vmp_runtime_bounds.py")
 text = path.read_text(encoding="utf-8")
-old = '''opcode = replace_once(
+
+old_terminal = '''opcode = replace_once(
     opcode,
     "    return 0xFF;\\n",
     "    vm_set_fault(VM_FAULT_INVALID_OPCODE);\\n"
@@ -11,7 +12,7 @@ old = '''opcode = replace_once(
     "opcode terminal fault",
 )
 '''
-new = '''terminal_return = "    return 0xFF;\\n"
+new_terminal = '''terminal_return = "    return 0xFF;\\n"
 if not opcode.endswith(terminal_return + "}"):
     raise SystemExit("get_opcode terminal return was not found")
 opcode = (
@@ -21,7 +22,18 @@ opcode = (
     + "}"
 )
 '''
-count = text.count(old)
-if count != 1:
-    raise SystemExit(f"terminal opcode helper block: expected 1, found {count}")
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
+if text.count(old_terminal) != 1:
+    raise SystemExit("terminal opcode helper block is not unique")
+text = text.replace(old_terminal, new_terminal, 1)
+
+old_guard = '''if "SEG_SIZE" in interpreter:
+    raise SystemExit("fixed SEG_SIZE remains in interpreter source")
+'''
+new_guard = '''if "#define SEG_SIZE" in interpreter:
+    raise SystemExit("fixed SEG_SIZE macro remains in interpreter source")
+'''
+if text.count(old_guard) != 1:
+    raise SystemExit("fixed-size helper guard is not unique")
+text = text.replace(old_guard, new_guard, 1)
+
+path.write_text(text, encoding="utf-8")

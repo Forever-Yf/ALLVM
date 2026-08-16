@@ -16,6 +16,7 @@ on:
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
+      - "tools/vmp-compatibility-smoke.cpp"
       - ".github/workflows/hardening-smoke.yml"
   push:
     branches:
@@ -34,6 +35,7 @@ on:
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
+      - "tools/vmp-compatibility-smoke.cpp"
       - ".github/workflows/hardening-smoke.yml"
 
 permissions:
@@ -57,6 +59,7 @@ jobs:
             build.cpp
             tools/allvm-doctor.py
             tools/check-hardening.py
+            tools/vmp-compatibility-smoke.cpp
             llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
             llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
             llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
@@ -93,6 +96,7 @@ jobs:
             llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            tools/vmp-compatibility-smoke.cpp
           sparse-checkout-cone-mode: true
 
       - name: Locate the newest installed LLVM toolchain
@@ -132,6 +136,29 @@ jobs:
             -Wno-unused-parameter \
             -fsyntax-only \
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+
+      - name: Build and run VMP compatibility behavior test
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core asmparser support)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra \
+            -Wno-unused-parameter \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp \
+            tools/vmp-compatibility-smoke.cpp \
+            "${LLVM_LDFLAGS[@]}" \
+            "${LLVM_LIBS[@]}" \
+            "${LLVM_SYSTEM_LIBS[@]}" \
+            -o /tmp/vmp-compatibility-smoke
+          /tmp/vmp-compatibility-smoke
 
       - name: Compile legacy VMP integration
         shell: bash

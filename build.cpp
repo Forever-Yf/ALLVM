@@ -64,6 +64,12 @@ static bool dir_create(const std::string &path) {
     return GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
+static FILE *open_file(const std::string &path, const char *mode) {
+    FILE *file = NULL;
+    const int error = fopen_s(&file, path.c_str(), mode);
+    return error == 0 ? file : NULL;
+}
+
 static bool copy_file(const std::string &src, const std::string &dst) {
     if (CopyFileA(src.c_str(), dst.c_str(), FALSE)) return true;
     printf("[ERROR] Copy failed: %s -> %s (Win32 error %lu)\n",
@@ -251,7 +257,7 @@ static std::string temporary_batch_path(const std::string &cwd) {
 
 static int run_cmd(const std::string &cmd, const std::string &cwd = "") {
     const std::string bat_file = temporary_batch_path(cwd);
-    FILE *file = std::fopen(bat_file.c_str(), "wb");
+    FILE *file = open_file(bat_file, "wb");
     if (!file) return -1;
 
     std::fprintf(file, "@echo off\r\n");
@@ -270,7 +276,7 @@ static int run_cmd_vcvars(
     const std::string &cmd,
     const std::string &cwd = "") {
     const std::string bat_file = temporary_batch_path(cwd);
-    FILE *file = std::fopen(bat_file.c_str(), "wb");
+    FILE *file = open_file(bat_file, "wb");
     if (!file) return -1;
 
     std::fprintf(file, "@echo off\r\n");
@@ -366,7 +372,7 @@ static bool generate_vm_h() {
         std::istreambuf_iterator<char>());
     input.close();
 
-    FILE *file = std::fopen(vm_h.c_str(), "wb");
+    FILE *file = open_file(vm_h, "wb");
     if (!file) {
         printf("[ERROR] Cannot write %s\n", vm_h.c_str());
         return false;
@@ -623,7 +629,7 @@ static void print_usage(const char *program) {
     printf("  --ndk <path>             Android NDK root directory\n");
     printf("  --target <triple>        Interpreter target triple\n");
     printf("  -j <jobs>                Ninja parallel job count\n");
-    printf("  --skip-build             Reuse existing generated/build outputs\n");
+    printf("  --skip-build             Reuse outputs; may combine with explicit install\n");
     printf("  --install-into-ndk       Explicitly modify a dedicated NDK copy\n");
     printf("  --doctor                 Run environment diagnostics before building\n");
     printf("  --doctor-only            Run diagnostics and exit\n");
@@ -719,7 +725,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (!skip_build && g_ndk_root.empty()) {
+    if ((!skip_build || install_into_ndk_flag) && g_ndk_root.empty()) {
         printf("[ERROR] Android NDK not found. Use --ndk or set ALLVM_NDK.\n");
         return 1;
     }
@@ -733,13 +739,14 @@ int main(int argc, char *argv[]) {
 
     if (!skip_build) {
         if (!build_ollvm(jobs)) return 1;
-        if (install_into_ndk_flag) {
-            if (!install_into_ndk()) return 1;
-        } else {
-            printf("\n[SAFE DEFAULT] Original NDK was not modified.\n");
-            printf("Built tools are in: %s\n", join_path(g_build_dir, "bin").c_str());
-            printf("Use --install-into-ndk only with a dedicated NDK copy.\n");
-        }
+    }
+
+    if (install_into_ndk_flag) {
+        if (!install_into_ndk()) return 1;
+    } else {
+        printf("\n[SAFE DEFAULT] Original NDK was not modified.\n");
+        printf("Built tools are in: %s\n", join_path(g_build_dir, "bin").c_str());
+        printf("Use --install-into-ndk only with a dedicated NDK copy.\n");
     }
 
     if ((build_apk_flag || build_apk_release_flag) && !install_into_ndk_flag) {

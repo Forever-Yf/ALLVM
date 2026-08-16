@@ -127,6 +127,17 @@ int main() {
       ret i32 %result
     }
 
+    define i1 @floating_compare(double %left, double %right) {
+    entry:
+      %less = fcmp olt double %left, %right
+      ret i1 %less
+    }
+
+    define <2 x i32> @vector_value(<2 x i32> %value) {
+    entry:
+      ret <2 x i32> %value
+    }
+
     define i32 @recursive(i32 %value) {
     entry:
       %next = call i32 @recursive(i32 %value)
@@ -166,6 +177,8 @@ int main() {
   Ok &= expect(M->getFunction("with_phi"), false, "PHI");
   Ok &= expect(M->getFunction("atomic_load"), false, "atomic");
   Ok &= expect(M->getFunction("signed_compare"), false, "有符号");
+  Ok &= expect(M->getFunction("floating_compare"), false, "浮点比较");
+  Ok &= expect(M->getFunction("vector_value"), false, "向量");
   Ok &= expect(M->getFunction("recursive"), false, "直接递归");
   Ok &= expect(M->getFunction("variadic_call"), false, "可变参数调用");
   Ok &= expect(M->getFunction("undef_value"), false, "undef/poison");

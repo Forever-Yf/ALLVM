@@ -1,0 +1,117 @@
+name: Align VMP preflight and translator values
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/apply-vmp-value-alignment.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out affected sources
+        uses: actions/checkout@v4
+        with:
+          ref: hardening/p0-secure-seeding-doctor
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/apply-vmp-value-alignment.yml
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Align constant and call handling
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          compatibility_path = Path(
+              'llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp'
+          )
+          compatibility = compatibility_path.read_text(encoding='utf-8')
+
+          old_constants = (
+              '  if (isa<ConstantPointerNull>(&C) || isa<UndefValue>(&C) ||\n'
+              '      isa<PoisonValue>(&C))\n'
+              '    return true;\n'
+          )
+          new_constants = (
+              '  if (isa<ConstantPointerNull>(&C))\n'
+              '    return true;\n'
+              '  if (isa<UndefValue>(&C) || isa<PoisonValue>(&C)) {\n'
+              '    Reason = "undef/poison 值不能在 VMP 中稳定具体化";\n'
+              '    return false;\n'
+              '  }\n'
+          )
+          if compatibility.count(old_constants) != 1:
+              raise SystemExit('constant support block is not unique')
+          compatibility = compatibility.replace(
+              old_constants, new_constants, 1
+          )
+
+          call_anchor = (
+              '        if (Call->getCallingConv() != CallingConv::C)\n'
+              '          reject(Result, "使用非 C 调用约定的调用");\n'
+          )
+          call_replacement = (
+              call_anchor
+              + '        if (Call->getFunctionType()->isVarArg())\n'
+              + '          reject(Result, "可变参数调用不受旧版 VM ABI 支持");\n'
+          )
+          if compatibility.count(call_anchor) != 1:
+              raise SystemExit('call-convention anchor is not unique')
+          compatibility = compatibility.replace(
+              call_anchor, call_replacement, 1
+          )
+          compatibility_path.write_text(compatibility, encoding='utf-8')
+
+          avmp_path = Path('llvm/lib/Transforms/Obfuscation/aVMP.cpp')
+          avmp = avmp_path.read_text(encoding='utf-8')
+          old_pack = (
+              '            if(ConstantData* CD = dyn_cast<ConstantData>(value)){\n'
+              '                packed = pack_const_value(value);\n'
+              '            }\n'
+          )
+          new_pack = (
+              '            if (isa<ConstantData>(value) ||\n'
+              '                isa<ConstantPointerNull>(value)) {\n'
+              '                packed = pack_const_value(value);\n'
+              '            }\n'
+          )
+          if avmp.count(old_pack) != 1:
+              raise SystemExit('packValue constant block is not unique')
+          avmp = avmp.replace(old_pack, new_pack, 1)
+          avmp_path.write_text(avmp, encoding='utf-8')
+          PY
+
+      - name: Validate value alignment
+        shell: bash
+        run: |
+          grep -q 'undef/poison 值不能在 VMP 中稳定具体化' \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+          grep -q '可变参数调用不受旧版 VM ABI 支持' \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+          grep -q 'isa<ConstantPointerNull>(value)' \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          ! grep -q 'ConstantData\* CD' \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+
+      - name: Remove one-time workflow
+        run: git rm .github/workflows/apply-vmp-value-alignment.yml
+
+      - name: Commit value alignment
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          git commit -m "vmp: align preflight and translator value handling"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

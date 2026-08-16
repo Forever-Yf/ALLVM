@@ -41,6 +41,7 @@ llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
 BuildSeed（32 字节）
 ├── constant-int
 ├── constant-fp
+├── string-encryption | ModuleIdentifier
 └── legacy-vmp | ModuleIdentifier | FunctionName
 ```
 
@@ -120,6 +121,19 @@ const uint32_t Threshold = static_cast<uint32_t>(-max) % max;
 - 对 PHI 节点统一使用 incoming-value API；
 - 保留 switch 前驱的跳过行为；
 - 显式包含 `unordered_map`，减少间接 include 依赖。
+
+### 字符串 Pass 随机生命周期
+
+`StringEncryption.cpp` 现在按 `string-encryption | ModuleIdentifier` 派生独立随机序列，因此显式 `ALLVM_BUILD_SEED` 模式可以复现字符串保护，而不同模块不会意外共享同一序列。
+
+同时完成：
+
+- 使用 `CryptoUtils::get_range()` 无偏选择 8/16 位密钥和垃圾区长度，包含配置的最大值；
+- 以 `std::vector<uint8_t>` 代替裸 `new[]` 临时随机缓冲；
+- 使用后清理临时随机缓冲；
+- Pass finalization 时清理编译进程内的字符串数据和密钥向量。
+
+这些改动改善的是构建随机性、可复现性和编译期敏感数据生命周期。现有字符串记录仍使用自定义可逆变换，密钥与密文共同存放在二进制中，也没有认证标签，因此不能称为 AEAD；标准认证加密仍是后续独立改造。
 
 ## 5. 旧版 VMP 随机化
 

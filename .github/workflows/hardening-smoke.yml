@@ -5,6 +5,7 @@ on:
     paths:
       - "README.md"
       - "docs/ALLVM_HARDENING.md"
+      - "build.cpp"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
@@ -19,6 +20,7 @@ on:
     paths:
       - "README.md"
       - "docs/ALLVM_HARDENING.md"
+      - "build.cpp"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
@@ -36,7 +38,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke:
+  linux-hardening:
+    name: Linux hardening checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -55,3 +58,18 @@ jobs:
 
       - name: Show report
         run: cat hardening-report.json
+
+  windows-build-helper:
+    name: Windows build helper compile
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Locate Visual Studio and compile build.cpp
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VS_INSTALL=%%i
+          if not defined VS_INSTALL exit /b 1
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /c build.cpp /Fo:build-helper.obj

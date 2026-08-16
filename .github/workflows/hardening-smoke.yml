@@ -1,0 +1,45 @@
+name: Hardening smoke checks
+
+on:
+  pull_request:
+    paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/allvm-doctor.py"
+      - ".github/workflows/hardening-smoke.yml"
+  push:
+    branches:
+      - "hardening/**"
+    paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/allvm-doctor.py"
+      - ".github/workflows/hardening-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate doctor script
+        run: |
+          python3 -m py_compile tools/allvm-doctor.py
+          python3 tools/allvm-doctor.py --help >/dev/null
+
+      - name: Guard hardened random paths
+        shell: bash
+        run: |
+          ! grep -nE '\b(srand|rand|time)\s*\(' \
+            llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp \
+            llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
+          grep -q 'BCryptGenRandom' \
+            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
+          grep -q '/dev/urandom' \
+            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h

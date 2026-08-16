@@ -116,7 +116,9 @@ inline bool fillFromOs(std::uint8_t *Buffer, std::size_t Size) {
     return false;
   }
 
-  return ::close(FD) == 0;
+  // Once all bytes are read, a close error does not invalidate the entropy.
+  ::close(FD);
+  return true;
 }
 #endif
 

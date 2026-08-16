@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: hardening/p0-secure-seeding-doctor
-          fetch-depth: 4
+          fetch-depth: 5
           sparse-checkout: |
             .github/workflows/apply-vmp-preflight-integration.yml
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
@@ -33,7 +33,7 @@ jobs:
 
           marker = "          python3 - <<'PY'"
           source = None
-          for revision in ('HEAD^', 'HEAD^^', 'HEAD^^^'):
+          for revision in ('HEAD^', 'HEAD^^', 'HEAD^^^', 'HEAD^^^^'):
               try:
                   candidate = subprocess.check_output(
                       ['git', 'show', f'{revision}:.github/workflows/apply-vmp-preflight-integration.yml'],
@@ -50,10 +50,16 @@ jobs:
 
           start = source.index(marker) + 1
           end = source.index("          PY", start)
-          payload_lines = [
-              line[10:] if line.startswith('          ') else line
-              for line in source[start:end]
-          ]
+          payload_lines = []
+          in_triple_string = False
+          for line in source[start:end]:
+              processed = line
+              if not in_triple_string and line.startswith('          '):
+                  processed = line[10:]
+              payload_lines.append(processed)
+              if line.count("'''") % 2 == 1:
+                  in_triple_string = not in_triple_string
+
           Path('/tmp/apply-vmp-preflight.py').write_text(
               '\n'.join(payload_lines) + '\n', encoding='utf-8'
           )

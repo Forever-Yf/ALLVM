@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: hardening/p0-secure-seeding-doctor
-          fetch-depth: 2
+          fetch-depth: 3
           sparse-checkout: |
             .github/workflows/apply-vmp-preflight-integration.yml
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
@@ -27,16 +27,36 @@ jobs:
       - name: Extract and run the validated patch payload
         shell: bash
         run: |
-          git show HEAD^:.github/workflows/apply-vmp-preflight-integration.yml > /tmp/previous-vmp-workflow.yml
           python3 - <<'PY'
           from pathlib import Path
-          import textwrap
+          import subprocess
 
-          source = Path('/tmp/previous-vmp-workflow.yml').read_text(encoding='utf-8').splitlines()
-          start = source.index("          python3 - <<'PY'") + 1
+          marker = "          python3 - <<'PY'"
+          source = None
+          for revision in ('HEAD^', 'HEAD^^'):
+              try:
+                  candidate = subprocess.check_output(
+                      ['git', 'show', f'{revision}:.github/workflows/apply-vmp-preflight-integration.yml'],
+                      text=True,
+                  ).splitlines()
+              except subprocess.CalledProcessError:
+                  continue
+              if marker in candidate:
+                  source = candidate
+                  break
+
+          if source is None:
+              raise SystemExit('could not locate the original VMP patch payload')
+
+          start = source.index(marker) + 1
           end = source.index("          PY", start)
-          payload = textwrap.dedent('\n'.join(source[start:end])) + '\n'
-          Path('/tmp/apply-vmp-preflight.py').write_text(payload, encoding='utf-8')
+          payload_lines = [
+              line[10:] if line.startswith('          ') else line
+              for line in source[start:end]
+          ]
+          Path('/tmp/apply-vmp-preflight.py').write_text(
+              '\n'.join(payload_lines) + '\n', encoding='utf-8'
+          )
           PY
           python3 /tmp/apply-vmp-preflight.py
 

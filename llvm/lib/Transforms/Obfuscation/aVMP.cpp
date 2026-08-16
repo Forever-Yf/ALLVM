@@ -30,6 +30,9 @@
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include "llvm/Transforms/Obfuscation/SecureRandom.h"
+#include "llvm/Transforms/Obfuscation/VMPCompatibility.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -48,6 +51,7 @@
 #include <assert.h>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -59,6 +63,73 @@
 
 using namespace llvm;
 using namespace std;
+
+static cl::opt<uint64_t> VMPMaxBasicBlocks(
+    "irobf-vmp-max-bbs", cl::init(4096),
+    cl::desc("Maximum basic blocks accepted by legacy VMP; 0 disables the limit"));
+static cl::opt<uint64_t> VMPMaxInstructions(
+    "irobf-vmp-max-instructions", cl::init(50000),
+    cl::desc("Maximum instructions accepted by legacy VMP; 0 disables the limit"));
+static cl::opt<uint64_t> VMPMaxCodeBytes(
+    "irobf-vmp-max-code-bytes", cl::init(16ULL * 1024ULL * 1024ULL),
+    cl::desc("Maximum estimated legacy VMP bytecode size; 0 disables the limit"));
+static cl::opt<uint64_t> VMPMaxDataBytes(
+    "irobf-vmp-max-data-bytes", cl::init(16ULL * 1024ULL * 1024ULL),
+    cl::desc("Maximum estimated legacy VMP data segment size; 0 disables the limit"));
+static cl::opt<bool> VMPStrictCompatibility(
+    "irobf-vmp-strict", cl::init(false),
+    cl::desc("Fail compilation instead of skipping an incompatible VMP function"));
+
+static allvm::VMPResourceLimits currentVMPResourceLimits() {
+    allvm::VMPResourceLimits Limits;
+    Limits.MaxBasicBlocks = VMPMaxBasicBlocks;
+    Limits.MaxInstructions = VMPMaxInstructions;
+    Limits.MaxCodeBytes = VMPMaxCodeBytes;
+    Limits.MaxDataBytes = VMPMaxDataBytes;
+    return Limits;
+}
+
+static bool validateVMPFunction(Function &F) {
+    const allvm::VMPCompatibilityResult Result =
+        allvm::analyzeVMPFunction(F, currentVMPResourceLimits());
+    if (Result.Supported) {
+        if (isIRObfuscationDebugEnabled()) {
+            errs() << "[VMP] Preflight accepted " << F.getName()
+                   << ": bbs=" << Result.BasicBlockCount
+                   << ", instructions=" << Result.InstructionCount
+                   << ", estimated-code=" << Result.EstimatedCodeBytes
+                   << ", estimated-data=" << Result.EstimatedDataBytes << "\n";
+        }
+        return true;
+    }
+
+    errs() << "[VMP] Skipping incompatible function '" << F.getName() << "':\n";
+    for (const std::string &Reason : Result.Reasons)
+        errs() << "  - " << Reason << "\n";
+
+    if (VMPStrictCompatibility) {
+        report_fatal_error(
+            (Twine("legacy VMP compatibility check failed for '") +
+             F.getName() + "'").str());
+    }
+    return false;
+}
+
+static void prepareVMPFunction(Function &F) {
+    F.removeFnAttr(Attribute::AlwaysInline);
+    F.addFnAttr(Attribute::NoInline);
+    F.addFnAttr(Attribute::OptimizeNone);
+}
+
+static void resetVMPGlobals() {
+    govm_interpreter = nullptr;
+    gv_code_seg = nullptr;
+    gv_data_seg = nullptr;
+    ip = nullptr;
+    data_seg_addr = nullptr;
+    code_seg_addr = nullptr;
+}
+
 // code and data segment
 // extern GlobalVariable * gv_code_seg;
 // extern GlobalVariable * gv_data_seg;
@@ -70,10 +141,6 @@ GlobalVariable * ip;
 GlobalVariable * data_seg_addr;
 GlobalVariable * code_seg_addr;
 
-
-// data and code seg size
-#define VM_CODE_SEG_SIZE 5000
-#define VM_DATA_SEG_SIZE 5000
 
 // Interpreter
 // extern Function * govm_interpreter;
@@ -158,11 +225,13 @@ std::string *LogUtils::log_title(const char *title) {
 class GOVMTranslator {
     
     public:
-        GOVMTranslator(Function * F) {
+        GOVMTranslator(Function * F,
+                       const allvm::VMPResourceLimits &Limits) {
             this->Mod = F->getParent();
             this->F = F;
             this->modDataLayout = const_cast<DataLayout *>(&this->Mod->getDataLayout());
             this->pointer_size = modDataLayout->getPointerSize();  // 动态获取指针大小
+            this->ResourceLimits = Limits;
 
             std::string RandomDomain = "legacy-vmp|";
             RandomDomain += this->Mod->getModuleIdentifier();
@@ -179,6 +248,9 @@ class GOVMTranslator {
         DataLayout * modDataLayout;
         unsigned pointer_size;  // 动态获取的指针大小,支持不同架构
         CryptoUtils RandomEngine;
+        allvm::VMPResourceLimits ResourceLimits;
+        bool TranslationFailed = false;
+        std::string TranslationError;
 
         // construct callinst_handler to interprete callinst 
         Function * callinst_handler;
@@ -260,6 +332,38 @@ class GOVMTranslator {
             return &value_map;
         }
 
+        StringRef getTranslationError() const {
+            return TranslationError;
+        }
+
+        void failTranslation(const Twine &Reason) {
+            if (!TranslationFailed)
+                TranslationError = Reason.str();
+            TranslationFailed = true;
+        }
+
+        bool checkActualResourceUsage() {
+            if (ResourceLimits.MaxCodeBytes != 0 &&
+                vm_code.size() > ResourceLimits.MaxCodeBytes) {
+                failTranslation(Twine("actual VM bytecode size ") +
+                                Twine(vm_code.size()) + " exceeds configured limit " +
+                                Twine(ResourceLimits.MaxCodeBytes));
+            }
+            if (curr_data_offset < 0) {
+                failTranslation("VM data offset became negative");
+            } else if (ResourceLimits.MaxDataBytes != 0 &&
+                       static_cast<uint64_t>(curr_data_offset) >
+                           ResourceLimits.MaxDataBytes) {
+                failTranslation(Twine("actual VM data size ") +
+                                Twine(curr_data_offset) +
+                                " exceeds configured limit " +
+                                Twine(ResourceLimits.MaxDataBytes));
+            }
+            if (vm_code.size() > std::numeric_limits<uint32_t>::max())
+                failTranslation("VM bytecode exceeds the 32-bit interpreter IP range");
+            return !TranslationFailed;
+        }
+
 
         // insert a value to value_map
         void insert_to_value_map(std::map<Value *, int> * value_map, Value * value, int offset){
@@ -310,7 +414,8 @@ class GOVMTranslator {
 
         /* encrypt vm_code */
         // mark seed for each basicblock
-        std::map<uint32_t, pair<uint32_t, uint32_t>> vm_code_seed_map;
+        std::vector<std::tuple<uint32_t, uint32_t, uint32_t>>
+            vm_code_seed_ranges;
 
         void init_xorshift32() {
             xorshift32_seed = gen_xorshift32_seed();
@@ -358,11 +463,12 @@ class GOVMTranslator {
         }
 
         void encrypt_vm_code() {
-            for (auto p: vm_code_seed_map) {
-                uint32_t vm_code_seed = p.first;
-                for (uint32_t addr = p.second.first; addr < p.second.second; addr++) {
+            for (const auto &Range : vm_code_seed_ranges) {
+                uint32_t vm_code_seed = std::get<0>(Range);
+                const uint32_t Begin = std::get<1>(Range);
+                const uint32_t End = std::get<2>(Range);
+                for (uint32_t addr = Begin; addr < End; ++addr)
                     vm_code[addr] ^= (xorshift32(&vm_code_seed) & 0xFF);
-                }
             }
         }
 
@@ -433,9 +539,8 @@ class GOVMTranslator {
             }
 
             if (!handled) {
-                if (isIRObfuscationDebugEnabled()) {
-                    errs() << "Unsport const value: " << *const_value << "\n";
-                }
+                failTranslation(Twine("unsupported constant value: ") +
+                                Twine(*const_value));
                 value = 0;
             }
 
@@ -479,7 +584,9 @@ class GOVMTranslator {
                         curr_data_offset += res_size;
                     }
                     else {
-                        assert(value_map->find(value) != value_map->end());
+                        failTranslation(Twine("value is missing from VMP data map: ") +
+                                        Twine(*value));
+                        return {};
                     }
                 }
 
@@ -547,6 +654,7 @@ void GOVMTranslator::construct_gv() {
                                                     /*Initializer=*/data_seg_init, // has initializer, specified
                                                                                     // below
                                                     /*Name=*/"gv_data_seg_"+F->getName());
+    gv_data_seg->setThreadLocal(true);
 
 
     // ip
@@ -554,18 +662,21 @@ void GOVMTranslator::construct_gv() {
     ip = new GlobalVariable(*Mod, Type::getInt32Ty(Mod->getContext()), 
                 false,  GlobalValue::InternalLinkage, 
                 ip_initGV, "ip_"+F->getName());
+    ip->setThreadLocal(true);
 
     // data_seg_addr
     Constant *data_seg_addr_initGV = ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0);
     data_seg_addr = new GlobalVariable(*Mod, Type::getInt64Ty(Mod->getContext()), 
                 false,  GlobalValue::InternalLinkage, 
                 data_seg_addr_initGV, "data_seg_addr_"+F->getName());
+    data_seg_addr->setThreadLocal(true);
 
     // code_seg_addr
     Constant *code_seg_addr_initGV = ConstantInt::get(Type::getInt64Ty(Mod->getContext()), 0);
     code_seg_addr = new GlobalVariable(*Mod, Type::getInt64Ty(Mod->getContext()), 
                 false,  GlobalValue::InternalLinkage, 
                 code_seg_addr_initGV, "code_seg_addr_"+F->getName());
+    code_seg_addr->setThreadLocal(true);
 }
 
 void GOVMTranslator::setup_callinst_handler() {
@@ -898,6 +1009,12 @@ void GOVMTranslator::handle_callinst(CallBase *inst, long long curr_func_id) {
 
 
 void GOVMTranslator::handle_inst(Instruction *ins) {
+    if (!ins) {
+        failTranslation("null LLVM instruction");
+        return;
+    }
+    if (isa<DbgInfoIntrinsic>(ins) || isa<LifetimeIntrinsic>(ins))
+        return;
 
     // switch inst type
     if(AllocaInst * inst = dyn_cast<AllocaInst>(ins)){
@@ -1050,10 +1167,10 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
                 Value* last_idx = indices.back();
                 if (ConstantInt* CI = dyn_cast<ConstantInt>(last_idx)) {
                     int element_idx = CI->getSExtValue();
-                    int curr_element_offset = 0;
-                    for (int i = 0; i < element_idx; i++) {
-                        curr_element_offset += modDataLayout->getTypeAllocSize(st->getElementType(i));
-                    }
+                    const StructLayout *Layout =
+                        modDataLayout->getStructLayout(st);
+                    const uint64_t curr_element_offset =
+                        Layout->getElementOffset(element_idx);
                     packed_value = pack(curr_element_offset, pointer_size);
                     packed_value.insert(packed_value.begin(), 1);
                     packed_value.insert(packed_value.begin(), pointer_size);
@@ -1352,198 +1469,124 @@ void GOVMTranslator::handle_inst(Instruction *ins) {
         vm_code.insert(vm_code.end(), hex_code.begin(), hex_code.end());
     }
 
-    else{
+    else {
+        failTranslation(Twine("unsupported instruction reached translator: ") +
+                        ins->getOpcodeName());
     }
 }
 
 
 // Translator
 bool GOVMTranslator::run(){
-    // errs() << "[Translator] Starting for function: " << F->getName() << "\n";
-    
-    bool has_exception_handling = false;
-    for(auto &BB : *F) {
-        for(auto &I : BB) {
-            if(isa<LandingPadInst>(&I)) {
-                has_exception_handling = true;
-                break;
-            }
-        }
-        if(has_exception_handling) break;
-    }
-    
-    if(has_exception_handling) {
-    }
-    
     curr_data_offset = 0;
-    
-    // if return not void, alloca a memory
-    if (!F->getReturnType()->isVoidTy()) {
+
+    if (!F->getReturnType()->isVoidTy())
         curr_data_offset += modDataLayout->getTypeAllocSize(F->getReturnType());
+
+    for (auto arg = F->arg_begin(); arg != F->arg_end(); ++arg) {
+        Value *tmparg = &*arg;
+        insert_to_value_map(&value_map, tmparg, curr_data_offset);
+        curr_data_offset += modDataLayout->getTypeAllocSize(tmparg->getType());
     }
-    
-    // parameter allocation
-    if(!F->isVarArg()){
-        for(auto arg = F->arg_begin(); arg != F->arg_end(); ++arg) {
-            
-            Value * tmparg = &*arg;
-            insert_to_value_map(&value_map, tmparg, curr_data_offset);
-            
-            curr_data_offset += modDataLayout->getTypeAllocSize(tmparg->getType());
-        }
-    }
-    
-    // 确保数据段至少有最小大小（16字节），避免空数据段导致的内存访问问题
-    if (curr_data_offset < 16) {
+
+    if (curr_data_offset < 16)
         curr_data_offset = 16;
-    }
-
-    // Align curr_data_offset to pointer alignment for subsequent allocations
-    if (curr_data_offset % pointer_size != 0) {
+    if (curr_data_offset % pointer_size != 0)
         curr_data_offset += pointer_size - (curr_data_offset % pointer_size);
-    }
+    if (!checkActualResourceUsage())
+        return false;
 
-    // traverse whole function
-    int bb_count = 0;
-    const int MAX_BASIC_BLOCKS = 10000;
-    const int MAX_INSTRUCTIONS = 100000;
-    int total_instructions = 0;
-    
-    // errs() << "[Translator] Data offset: " << curr_data_offset << ", starting traversal\n";
-    
-    for(auto bbl = F->begin(); bbl != F->end(); bbl++){
-        
-        if (bb_count >= MAX_BASIC_BLOCKS) {
-            break;
+    for (auto bbl = F->begin(); bbl != F->end(); ++bbl) {
+        BasicBlock *bb = &*bbl;
+        if (vm_code.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            failTranslation("basic block offset exceeds signed-int range");
+            return false;
         }
+        basicblock_map.emplace(bb, static_cast<int>(vm_code.size()));
 
-        BasicBlock * bb = &*bbl;
-        basicblock_map.insert(pair<BasicBlock *, int>(bb, vm_code.size()));
-
-        // 每个基本块开头需要两个种子：
-        // 1. opcode_xorshift32_state - 用于解密操作码
-        // 2. vm_code_state - 用于解密VM代码
         opcode_seed_setup();
-        uint32_t vm_code_seed = vm_code_seed_setup();
-        uint32_t currbb_begin = vm_code.size();
+        const uint32_t vm_code_seed = vm_code_seed_setup();
+        const uint32_t currbb_begin = static_cast<uint32_t>(vm_code.size());
 
         std::vector<Instruction *> instructions_to_process;
-        for(auto ins = bbl->begin(); ins != bbl->end(); ins++){
+        for (auto ins = bbl->begin(); ins != bbl->end(); ++ins)
             instructions_to_process.push_back(&*ins);
-        }
-        
-        // errs() << "[Translator] BB " << bb_count << " has " << instructions_to_process.size() << " instructions\n";
-        
-        for(Instruction *inst : instructions_to_process){
 
-            if (total_instructions >= MAX_INSTRUCTIONS) {
-                break;
-            }
-            
-            if (!inst || inst->getParent() != bb) {
+        for (Instruction *inst : instructions_to_process) {
+            if (!inst || inst->getParent() != bb)
                 continue;
-            }
 
             std::vector<std::pair<unsigned, ConstantExpr *>> const_exprs;
-            for (unsigned idx = 0; idx < inst->getNumOperands(); idx++) {
-                if (ConstantExpr * Op = dyn_cast<ConstantExpr>(inst->getOperand(idx))) {
-                    const_exprs.push_back(std::make_pair(idx, Op));
-                }
+            for (unsigned idx = 0; idx < inst->getNumOperands(); ++idx) {
+                if (ConstantExpr *Op = dyn_cast<ConstantExpr>(inst->getOperand(idx)))
+                    const_exprs.emplace_back(idx, Op);
             }
-            
-            for (auto &pair : const_exprs) {
-                unsigned idx = pair.first;
-                ConstantExpr *Op = pair.second;
-                
-                if (!inst || inst->getParent() != bb) {
-                    break;
-                }
-                
-                Instruction * const_inst = Op->getAsInstruction();
-                
-                if (isa<PHINode>(inst) && !isa<PHINode>(const_inst)) {
-                    BasicBlock::iterator insertPos = bb->getFirstInsertionPt();
-                    const_inst->insertBefore(insertPos);
-                } else {
-                    const_inst->insertBefore(inst->getIterator());
-                }
 
+            for (const auto &Item : const_exprs) {
+                const unsigned idx = Item.first;
+                ConstantExpr *Op = Item.second;
+                Instruction *const_inst = Op->getAsInstruction();
+                const_inst->insertBefore(inst->getIterator());
                 inst->setOperand(idx, const_inst);
-
                 handle_inst(const_inst);
+                if (TranslationFailed)
+                    return false;
             }
-            
-            if (inst && inst->getParent() == bb) {
-                // errs() << "[Translator] Handling inst #" << total_instructions << ": " << inst->getOpcodeName() << "\n";
-                handle_inst(inst);
-            }
-            total_instructions++;
-        }
-        
-        if (total_instructions >= MAX_INSTRUCTIONS) {
-            break;
+
+            handle_inst(inst);
+            if (TranslationFailed || !checkActualResourceUsage())
+                return false;
         }
 
-        uint32_t currbb_end = vm_code.size();
-        vm_code_seed_map.insert(pair<uint32_t, pair<uint32_t, uint32_t>>(vm_code_seed, pair<uint32_t, uint32_t>(currbb_begin, currbb_end)));
-        bb_count++;
+        const uint32_t currbb_end = static_cast<uint32_t>(vm_code.size());
+        vm_code_seed_ranges.emplace_back(vm_code_seed, currbb_begin, currbb_end);
+        if (!checkActualResourceUsage())
+            return false;
     }
 
-    // fill br map
-    for(auto it=br_map.rbegin(); it!=br_map.rend(); it++) {
-        int code_pos = it->first;
-        BasicBlock * target_bb = it->second;
-        auto bb_it = basicblock_map.find(target_bb);
-        if (bb_it != basicblock_map.end()) {
-            uint32_t target_offset = bb_it->second;
-            if (target_offset >= vm_code.size()) {
-                target_offset = 0;
-            }
-            std::vector<uint8_t> bb_addr = pack(target_offset, pointer_size);
-            if (code_pos + pointer_size <= (int)vm_code.size()) {
-                std::copy(bb_addr.begin(), bb_addr.end(), vm_code.begin()+code_pos);
-            }
+    for (auto it = br_map.rbegin(); it != br_map.rend(); ++it) {
+        const int code_pos = it->first;
+        auto bb_it = basicblock_map.find(it->second);
+        if (bb_it == basicblock_map.end()) {
+            failTranslation("branch target was not translated");
+            return false;
         }
-    }
-    
-    // LLVM 21: Fill switch_map
-    for(auto it=switch_map.rbegin(); it!=switch_map.rend(); it++) {
-        int code_pos = std::get<0>(*it);
-        BasicBlock * target_bb = std::get<1>(*it);
-        auto bb_it = basicblock_map.find(target_bb);
-        if (bb_it != basicblock_map.end()) {
-            uint32_t target_offset = bb_it->second;
-            if (target_offset >= vm_code.size()) {
-                target_offset = 0;
-            }
-            std::vector<uint8_t> bb_addr = pack(target_offset, pointer_size);
-            if (code_pos + pointer_size <= (int)vm_code.size()) {
-                std::copy(bb_addr.begin(), bb_addr.end(), vm_code.begin()+code_pos);
-            }
+        const uint32_t target_offset = static_cast<uint32_t>(bb_it->second);
+        const std::vector<uint8_t> bb_addr = pack(target_offset, pointer_size);
+        if (code_pos < 0 ||
+            static_cast<size_t>(code_pos) + pointer_size > vm_code.size()) {
+            failTranslation("branch patch position is outside VM bytecode");
+            return false;
         }
+        std::copy(bb_addr.begin(), bb_addr.end(), vm_code.begin() + code_pos);
     }
 
-    /* vm_code finish */
+    for (auto it = switch_map.rbegin(); it != switch_map.rend(); ++it) {
+        const int code_pos = std::get<0>(*it);
+        auto bb_it = basicblock_map.find(std::get<1>(*it));
+        if (bb_it == basicblock_map.end()) {
+            failTranslation("switch target was not translated");
+            return false;
+        }
+        const uint32_t target_offset = static_cast<uint32_t>(bb_it->second);
+        const std::vector<uint8_t> bb_addr = pack(target_offset, pointer_size);
+        if (code_pos < 0 ||
+            static_cast<size_t>(code_pos) + pointer_size > vm_code.size()) {
+            failTranslation("switch patch position is outside VM bytecode");
+            return false;
+        }
+        std::copy(bb_addr.begin(), bb_addr.end(), vm_code.begin() + code_pos);
+    }
 
-    // errs() << "[Translator] Encrypting vm_code...\n";
-    // encrypt vm_code with basicblock seed
+    if (!checkActualResourceUsage())
+        return false;
+
     encrypt_vm_code();
-
-    // errs() << "[Translator] Constructing gv...\n";
     construct_gv();
-
-    // errs() << "[Translator] Handling callinst...\n";
-    // handle callinst
-    for (auto p: callinst_map) {
-        handle_callinst(p.first, p.second);
-    }
-
-    // errs() << "[Translator] Finishing callinst_handler...\n";
-    // callinst_handler fini
+    for (const auto &Item : callinst_map)
+        handle_callinst(Item.first, Item.second);
     finish_callinst_handler();
-    
-    // errs() << "[Translator] Done!\n";
-    return true;  // 返回 true 表示成功处理
+    return !TranslationFailed;
 }
 
 
@@ -1717,7 +1760,7 @@ class GOVMInterpreter {
         GlobalVariable *opcode_xorshift32_state;
         GlobalVariable *vm_code_state;
 
-        virtual void run ();
+        virtual bool run ();
         virtual void construct_gv ();
 
 
@@ -1828,27 +1871,30 @@ void GOVMInterpreter::construct_gv() {
     pointer_size_gv = new GlobalVariable(*Mod, Type::getInt32Ty(Mod->getContext()), 
                 false,  GlobalValue::InternalLinkage, 
                 pointer_size_initGV, "pointer_size_"+F->getName());
+    pointer_size_gv->setThreadLocal(true);
 
     // opcode_xorshift32_state      32bit
     Constant *opcode_xorshift32_state_initGV = ConstantInt::get(Type::getInt32Ty(Mod->getContext()), 0);
     opcode_xorshift32_state = new GlobalVariable(*Mod, Type::getInt32Ty(Mod->getContext()), 
                 false,  GlobalValue::InternalLinkage, 
                 opcode_xorshift32_state_initGV, "opcode_xorshift32_state_"+F->getName());
+    opcode_xorshift32_state->setThreadLocal(true);
 
     // vm_code_state                32bit
     Constant *vm_code_state_initGV = ConstantInt::get(Type::getInt32Ty(Mod->getContext()), 0);
     vm_code_state = new GlobalVariable(*Mod, Type::getInt32Ty(Mod->getContext()), 
                 false,  GlobalValue::InternalLinkage, 
                 vm_code_state_initGV, "vm_code_state_"+F->getName());
+    vm_code_state->setThreadLocal(true);
 }
 
 // Function *govm_interpreter;
 
-void GOVMInterpreter::run() {
+bool GOVMInterpreter::run() {
 
     Module *interpreter_module = llvm_parse_bitcode_from_string();
     if (!interpreter_module) {
-        return;
+        return false;
     }
 
     // replace GlobalVariable 
@@ -1970,6 +2016,7 @@ void GOVMInterpreter::run() {
 
     
     govm_interpreter = Mod->getFunction("vm_interpreter_"+F->getName().str());
+    return govm_interpreter != nullptr;
 }
 namespace {
 
@@ -2085,259 +2132,118 @@ namespace {
         return false;
     }
 
+static void eraseUnusedGlobal(GlobalValue *Value) {
+    if (Value != nullptr && Value->use_empty())
+        Value->eraseFromParent();
+}
+
+static void cleanupFailedVMP(GOVMTranslator &Translator,
+                             GOVMInterpreter *Interpreter = nullptr) {
+    eraseUnusedGlobal(Translator.get_callinst_handler());
+    if (Interpreter != nullptr) {
+        eraseUnusedGlobal(Interpreter->pointer_size_gv);
+        eraseUnusedGlobal(Interpreter->opcode_xorshift32_state);
+        eraseUnusedGlobal(Interpreter->vm_code_state);
+    }
+    eraseUnusedGlobal(gv_code_seg);
+    eraseUnusedGlobal(gv_data_seg);
+    eraseUnusedGlobal(ip);
+    eraseUnusedGlobal(data_seg_addr);
+    eraseUnusedGlobal(code_seg_addr);
+    resetVMPGlobals();
+}
+
+static bool runVMPOnFunction(Function &F) {
+    resetVMPGlobals();
+    const allvm::VMPResourceLimits Limits = currentVMPResourceLimits();
+    GOVMTranslator Translator(&F, Limits);
+    if (!Translator.run()) {
+        errs() << "[VMP] Translation failed for '" << F.getName()
+               << "': " << Translator.getTranslationError() << "
+";
+        cleanupFailedVMP(Translator);
+        return false;
+    }
+
+    GOVMInterpreter Interpreter(&F, Translator.get_callinst_handler());
+    if (!Interpreter.run()) {
+        errs() << "[VMP] Embedded interpreter setup failed for '"
+               << F.getName() << "'
+";
+        cleanupFailedVMP(Translator, &Interpreter);
+        return false;
+    }
+
+    GOVMModifier Modifier(&F, Translator.get_gv_value_map(),
+                          Translator.get_value_map());
+    Modifier.run();
+    if (verifyFunction(F, &errs()))
+        report_fatal_error(
+            (Twine("legacy VMP produced invalid IR for '") + F.getName() + "'").str());
+    return true;
+}
+
 struct VMProtect : public ModulePass {
   static char ID;
   bool flag;
-  VMProtect() : ModulePass(ID) {}
-  VMProtect(bool flag): ModulePass(ID)
-  {
-    this->flag = flag;
+
+  VMProtect() : ModulePass(ID), flag(false) {}
+  explicit VMProtect(bool flag) : ModulePass(ID), flag(flag) {}
+
+  bool runOnModule(Module &M) override {
+    if (!isLicenseValidated())
+      return false;
+
+    std::vector<Function *> FunctionsToProcess;
+    for (Function &F : M) {
+      if (!toObfuscateFunction(flag, &F, "vmp"))
+        continue;
+      if (!validateVMPFunction(F))
+        continue;
+      prepareVMPFunction(F);
+      FunctionsToProcess.push_back(&F);
+    }
+
+    bool Changed = false;
+    for (Function *F : FunctionsToProcess) {
+      errs() << "[VMP] Processing function: " << F->getName() << "
+";
+      if (runVMPOnFunction(*F)) {
+        Changed = true;
+        if (isIRObfuscationDebugEnabled())
+          errs() << "[VMP] Function done: " << F->getName() << "
+";
+      }
+    }
+    return Changed;
   }
-  virtual bool runOnModule(Module &M)
-  {
-      if (!isLicenseValidated()) return false;
-
-      if (isIRObfuscationDebugEnabled()) {
-        errs() << "[DEBUG] VMProtect: Starting runOnModule\n";
-      }
-      
-      // 先收集所有需要处理的函数，避免在遍历时修改模块
-      std::vector<Function *> functions_to_process;
-      for(auto Func = M.begin(); Func != M.end(); ++Func)
-      {
-        Function *F = &*Func;
-        // errs() << "[VMProtect] Checking function: " << F->getName() << "\n";
-        
-        if(toObfuscateFunction(this->flag,F,"vmp"))
-        {
-          if(F->isVarArg()) {
-            continue;
-          }
-          // VMP 函数使用 O0 优化，添加 OptimizeNone 防止优化
-          // 添加 AlwaysInline 强制内联
-          F->addFnAttr(Attribute::AlwaysInline);
-          F->addFnAttr(Attribute::OptimizeNone);
-          // 跳过标准库函数（只跳过明确的标准库函数，不跳过用户函数）
-          // 带vmp注解的函数不进行标准库名称过滤
-          std::string funcName = F->getName().str();
-          
-          bool is_stdlib = false;
-          
-          if(F->isDeclaration()) {
-            // 跳过以__开头（编译器内部函数）
-            if(funcName.length() >= 2 && funcName[0] == '_' && funcName[1] == '_') {
-              is_stdlib = true;
-            }
-            // 跳过C标准库函数
-            else if(funcName.find("printf") != std::string::npos ||
-               funcName.find("sprintf") != std::string::npos ||
-               funcName.find("fprintf") != std::string::npos ||
-               funcName.find("vsprintf") != std::string::npos ||
-               funcName.find("vfprintf") != std::string::npos ||
-               funcName.find("vsnprintf") != std::string::npos ||
-               funcName.find("local_stdio") != std::string::npos ||
-               funcName.find("frexp") != std::string::npos ||
-               funcName.find("ldexp") != std::string::npos ||
-               funcName.find("modf") != std::string::npos ||
-               funcName.find("scalbn") != std::string::npos ||
-               funcName.find("ilogb") != std::string::npos ||
-               funcName.find("logb") != std::string::npos ||
-               funcName.find("copysign") != std::string::npos ||
-               funcName.find("nan") != std::string::npos ||
-               funcName.find("nextafter") != std::string::npos ||
-               funcName.find("fdim") != std::string::npos ||
-               funcName.find("fmax") != std::string::npos ||
-               funcName.find("fmin") != std::string::npos ||
-               funcName.find("fma") != std::string::npos ||
-               funcName.find("isnan") != std::string::npos ||
-               funcName.find("isinf") != std::string::npos ||
-               funcName.find("isfinite") != std::string::npos ||
-               funcName.find("fabs") != std::string::npos ||
-               funcName.find("ceil") != std::string::npos ||
-               funcName.find("floor") != std::string::npos ||
-               funcName.find("round") != std::string::npos ||
-               funcName.find("trunc") != std::string::npos ||
-               funcName.find("sqrt") != std::string::npos ||
-               funcName.find("pow") != std::string::npos ||
-               funcName.find("exp") != std::string::npos ||
-               funcName.find("log") != std::string::npos ||
-               funcName.find("sin") != std::string::npos ||
-               funcName.find("cos") != std::string::npos ||
-               funcName.find("tan") != std::string::npos ||
-               funcName.find("asin") != std::string::npos ||
-               funcName.find("acos") != std::string::npos ||
-               funcName.find("atan") != std::string::npos ||
-               funcName.find("atan2") != std::string::npos ||
-               funcName.find("sinh") != std::string::npos ||
-               funcName.find("cosh") != std::string::npos ||
-               funcName.find("tanh") != std::string::npos) {
-              is_stdlib = true;
-            }
-            // 跳过C++标准库函数（检查std::命名空间）
-            else if(funcName.find("std::") != std::string::npos ||
-               funcName.find("basic_ostream") != std::string::npos ||
-               funcName.find("basic_ios") != std::string::npos ||
-               funcName.find("basic_istream") != std::string::npos ||
-               funcName.find("basic_string") != std::string::npos ||
-               funcName.find("basic_iostream") != std::string::npos ||
-               funcName.find("basic_fstream") != std::string::npos ||
-               funcName.find("basic_ifstream") != std::string::npos ||
-               funcName.find("basic_ofstream") != std::string::npos ||
-               funcName.find("basic_stringbuf") != std::string::npos ||
-               funcName.find("basic_istringstream") != std::string::npos ||
-               funcName.find("basic_ostringstream") != std::string::npos ||
-               funcName.find("basic_stringstream") != std::string::npos ||
-               funcName.find("ctype") != std::string::npos ||
-               funcName.find("locale") != std::string::npos ||
-               funcName.find("char_traits") != std::string::npos ||
-               funcName.find("numpunct") != std::string::npos ||
-               funcName.find("num_put") != std::string::npos ||
-               funcName.find("allocator") != std::string::npos ||
-               funcName.find("ios_base") != std::string::npos ||
-               funcName.find("ostreambuf") != std::string::npos ||
-               funcName.find("istreambuf") != std::string::npos ||
-               funcName.find("bad_cast") != std::string::npos ||
-               funcName.find("bad_alloc") != std::string::npos ||
-               funcName.find("exception") != std::string::npos ||
-               funcName.find("bad_exception") != std::string::npos ||
-               funcName.find("runtime_error") != std::string::npos ||
-               funcName.find("logic_error") != std::string::npos ||
-               funcName.find("out_of_range") != std::string::npos ||
-               funcName.find("length_error") != std::string::npos ||
-               funcName.find("domain_error") != std::string::npos ||
-               funcName.find("invalid_argument") != std::string::npos ||
-               funcName.find("range_error") != std::string::npos ||
-               funcName.find("overflow_error") != std::string::npos ||
-               funcName.find("underflow_error") != std::string::npos) {
-              is_stdlib = true;
-            }
-          }
-          
-          if(is_stdlib) {
-            continue;
-          }
-          functions_to_process.push_back(F);
-        }
-      }
-      
-      // 如果没有函数需要保护，直接返回
-      if (functions_to_process.empty()) {
-        return false;
-      }
-      
-      // 处理收集到的函数
-      int func_count = 0;
-      for(Function *F : functions_to_process)
-      {
-        if (isIRObfuscationDebugEnabled()) {
-          errs() << "[VMP] Processing function: " << F->getName() << "\n";
-        }
-        
-        govm_interpreter = nullptr;
-        gv_code_seg = nullptr;
-        gv_data_seg = nullptr;
-        ip = nullptr;
-        data_seg_addr = nullptr;
-
-        GOVMTranslator * translator = new GOVMTranslator(F);
-        
-        if (!translator->run()) {
-          continue;
-        }
-        
-        GOVMInterpreter * interpreter = new GOVMInterpreter(F, translator->get_callinst_handler());
-        interpreter->run();
-        
-        GOVMModifier * modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_value_map());
-        modifier->run();
-        
-        if (isIRObfuscationDebugEnabled()) {
-          errs() << "[VMP] Function done: " << F->getName() << "\n";
-        }
-        func_count++;
-      }
-      
-      return true;
-
-  }
-
-
-}; // end of struct InlineFunction
-}  // end of anonymous namespace
+};
+} // end of anonymous namespace
 
 char VMProtect::ID = 0;
-static RegisterPass<VMProtect> X("aVMP", "aVMP",false,true);
+static RegisterPass<VMProtect> X("aVMP", "aVMP", false, true);
 Pass *llvm::createVMProtectPass(bool flag) {
   return new VMProtect(flag);
 }
 
-// New PassManager support
-PreservedAnalyses llvm::VMProtectPass::run(Module &M, ModuleAnalysisManager &AM) {
-  bool changed = false;
-  
-  std::vector<Function *> functions_to_process;
-  for(auto Func = M.begin(); Func != M.end(); ++Func)
-  {
-    Function *F = &*Func;
-    if(toObfuscateFunction(this->flag,F,"vmp"))
-    {
-      if(F->isVarArg()) {
-        continue;
-      }
-      // 为 VMP 函数添加 inline 属性，允许内联展开
-      F->addFnAttr(Attribute::AlwaysInline);
-      std::string funcName = F->getName().str();
-      
-      bool is_stdlib = false;
-      
-      // 只对声明函数（外部函数）进行标准库过滤
-      if(F->isDeclaration()) {
-        if(funcName.find("printf") != std::string::npos ||
-           funcName.find("sprintf") != std::string::npos ||
-           funcName.find("fprintf") != std::string::npos ||
-           funcName.find("malloc") != std::string::npos ||
-           funcName.find("free") != std::string::npos ||
-           funcName.find("std::") != std::string::npos ||
-           funcName.find("basic_ostream") != std::string::npos ||
-           funcName.find("basic_string") != std::string::npos) {
-          is_stdlib = true;
-        }
-      }
-      
-      if(is_stdlib) {
-        continue;
-      }
-      
-      functions_to_process.push_back(F);
-    }
-  }
-  
-  // 如果没有函数需要保护，直接返回
-  if (functions_to_process.empty()) {
-    return PreservedAnalyses::all();
-  }
-  
-  int func_count = 0;
-  for(Function *F : functions_to_process) {
-    GOVMTranslator * translator = new GOVMTranslator(F);
-    
-    if (!translator->run()) {
+PreservedAnalyses llvm::VMProtectPass::run(Module &M,
+                                           ModuleAnalysisManager &AM) {
+  (void)AM;
+  std::vector<Function *> FunctionsToProcess;
+  for (Function &F : M) {
+    if (!toObfuscateFunction(flag, &F, "vmp"))
       continue;
-    }
-    
-    GOVMInterpreter * interpreter = new GOVMInterpreter(F, translator->get_callinst_handler());
-    
-    interpreter->run();
-    
-    GOVMModifier * modifier = new GOVMModifier(F, translator->get_gv_value_map(), translator->get_value_map());
-    
-    modifier->run();
-    
-    func_count++;
-    changed = true;
+    if (!validateVMPFunction(F))
+      continue;
+    prepareVMPFunction(F);
+    FunctionsToProcess.push_back(&F);
   }
-  
-  return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+
+  bool Changed = false;
+  for (Function *F : FunctionsToProcess)
+    Changed |= runVMPOnFunction(*F);
+
+  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 #endif
 

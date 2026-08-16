@@ -29,6 +29,7 @@
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
+#include "llvm/Transforms/Obfuscation/SecureRandom.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -163,6 +164,12 @@ class GOVMTranslator {
             this->modDataLayout = const_cast<DataLayout *>(&this->Mod->getDataLayout());
             this->pointer_size = modDataLayout->getPointerSize();  // 动态获取指针大小
 
+            std::string RandomDomain = "legacy-vmp|";
+            RandomDomain += this->Mod->getModuleIdentifier();
+            RandomDomain += '|';
+            RandomDomain += this->F->getName().str();
+            allvm::seedCryptoUtils(RandomEngine, RandomDomain.c_str());
+
             // construct function and global variables
             init();
         }
@@ -171,6 +178,7 @@ class GOVMTranslator {
         Function * F;
         DataLayout * modDataLayout;
         unsigned pointer_size;  // 动态获取的指针大小,支持不同架构
+        CryptoUtils RandomEngine;
 
         // construct callinst_handler to interprete callinst 
         Function * callinst_handler;
@@ -305,14 +313,16 @@ class GOVMTranslator {
         std::map<uint32_t, pair<uint32_t, uint32_t>> vm_code_seed_map;
 
         void init_xorshift32() {
-            srand(time(0));
+            xorshift32_seed = gen_xorshift32_seed();
+            xorshift32_state = xorshift32_seed;
         }
 
         uint32_t gen_xorshift32_seed() {
-            for (int _ = 0; _ < 10; _++) {
-                xorshift32_seed ^= rand();
-            }
-            return xorshift32_seed;
+            uint32_t Seed = 0;
+            do {
+                Seed = RandomEngine.get_uint32_t();
+            } while (Seed == 0);
+            return Seed;
         }
 
         /* The state word must be initialized to non-zero */

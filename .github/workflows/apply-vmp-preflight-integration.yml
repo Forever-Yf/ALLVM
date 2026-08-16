@@ -14,11 +14,11 @@ jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out branch and previous payload
+      - name: Check out branch and original payload
         uses: actions/checkout@v4
         with:
           ref: hardening/p0-secure-seeding-doctor
-          fetch-depth: 6
+          fetch-depth: 0
           sparse-checkout: |
             .github/workflows/apply-vmp-preflight-integration.yml
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
@@ -31,25 +31,19 @@ jobs:
           from pathlib import Path
           import subprocess
 
+          source = subprocess.check_output(
+              [
+                  'git',
+                  'show',
+                  'f149b393bcd0102ad11ba97b2b1871e365650087:.github/workflows/apply-vmp-preflight-integration.yml',
+              ],
+              text=True,
+          ).splitlines()
+
           marker = "          python3 - <<'PY'"
-          source = None
-          for revision in ('HEAD^', 'HEAD^^', 'HEAD^^^', 'HEAD^^^^', 'HEAD^^^^^'):
-              try:
-                  candidate = subprocess.check_output(
-                      ['git', 'show', f'{revision}:.github/workflows/apply-vmp-preflight-integration.yml'],
-                      text=True,
-                  ).splitlines()
-              except subprocess.CalledProcessError:
-                  continue
-              if marker in candidate and any('def replace_once' in line for line in candidate):
-                  source = candidate
-                  break
-
-          if source is None:
-              raise SystemExit('could not locate the original VMP patch payload')
-
           start = source.index(marker) + 1
           end = source.index("          PY", start)
+
           payload_lines = []
           in_triple_string = False
           for line in source[start:end]:

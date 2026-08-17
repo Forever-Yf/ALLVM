@@ -47,8 +47,10 @@ jobs:
           cat .github/patches/vmp-integrity-*.b64 > /tmp/apply-vmp-integrity.py.gz.b64
           base64 -d /tmp/apply-vmp-integrity.py.gz.b64 | gzip -d > /tmp/apply-vmp-integrity.py
           test "$(sha256sum /tmp/apply-vmp-integrity.py | cut -d' ' -f1)" = "34ce580f2452d39e69e0fe9eba5b26be963e6cd7a226c69e2ff35cfbe5d7b0ab"
-          python3 -m py_compile /tmp/apply-vmp-integrity.py
-          python3 /tmp/apply-vmp-integrity.py
+          cp /tmp/apply-vmp-integrity.py tools/.apply-vmp-integrity.py
+          python3 -m py_compile tools/.apply-vmp-integrity.py
+          python3 tools/.apply-vmp-integrity.py
+          rm tools/.apply-vmp-integrity.py
 
       - name: Locate installed LLVM
         shell: bash

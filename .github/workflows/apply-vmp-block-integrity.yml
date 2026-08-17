@@ -24,11 +24,17 @@ jobs:
             .github/workflows/hardening-smoke.yml
             README.md
             docs/ALLVM_HARDENING.md
+            build.cpp
             aVMPInterpreter/aVMPInterpreter.c
             aVMPInterpreter/aVMPInterpreter.h
             aVMPInterpreter/aVMPInterpreter.bc
             llvm/include/llvm/CryptoUtils.h
             llvm/include/llvm/Transforms/Obfuscation
+            llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+            llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
+            llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
             tools/allvm-doctor.py

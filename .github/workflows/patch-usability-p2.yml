@@ -57,7 +57,7 @@ jobs:
 
       - name: Commit validated implementation
         run: |
-          git rm tools/apply-usability-p2.py tools/fix-usability-p2-script.py
+          git rm -f tools/apply-usability-p2.py tools/fix-usability-p2-script.py
           git add \
             README.md \
             docs/ALLVM_USAGE_CN.md \

@@ -1,0 +1,266 @@
+name: Apply VMP opcode collision fix
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/apply-vmp-opcode-collision-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out required files
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/apply-vmp-opcode-collision-fix.yml
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/aVMPInterpreter.bc
+            llvm/include/llvm/Transforms/Obfuscation/vm.h
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+            tools/check-vmp-embed.py
+            tools/vmp-interpreter-bounds-smoke.c
+          sparse-checkout-cone-mode: false
+
+      - name: Apply exact opcode fixes and tests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_region(path_text: str, start_marker: str, end_marker: str, replacement: str) -> None:
+              path = Path(path_text)
+              text = path.read_text(encoding="utf-8")
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f"missing start marker in {path_text}: {start_marker!r}")
+              end = text.find(end_marker, start)
+              if end < 0:
+                  raise SystemExit(f"missing end marker in {path_text}: {end_marker!r}")
+              path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+
+          avmp_pack = r'''        // Encode one opcode as its ordinal in a collision-free xorshift byte sequence.
+          // Byte zero is reserved for NOP and therefore does not advance the state.
+          std::vector<uint8_t> pack_op(uint8_t op) {
+              if (op == NOP_OP)
+                  return {0};
+              if (op > OP_TOTAL) {
+                  failTranslation(Twine("opcode ") + Twine(op) +
+                                  " exceeds the legacy VMP opcode range");
+                  return {};
+              }
+
+              uint8_t seen[256] = {};
+              uint8_t result = 0;
+              unsigned unique_count = 0;
+              unsigned attempts = 0;
+
+              while (unique_count < op) {
+                  if (++attempts > 4096U) {
+                      failTranslation("unable to construct a collision-free opcode sequence");
+                      return {};
+                  }
+
+                  const uint8_t candidate =
+                      static_cast<uint8_t>(xorshift32(&xorshift32_state) & 0xFFU);
+                  if (candidate == 0 || seen[candidate] != 0)
+                      continue;
+
+                  seen[candidate] = 1;
+                  result = candidate;
+                  ++unique_count;
+              }
+
+              return {result};
+          }
+'''
+          replace_region(
+              "llvm/lib/Transforms/Obfuscation/aVMP.cpp",
+              "        // pack one byte opcode\n        std::vector<uint8_t> pack_op",
+              "\n\n        // pack a Constant",
+              avmp_pack,
+          )
+
+          interpreter_get_opcode = r'''/* Get Opcode, Opcode encrypt by xorshift32*/
+          uint8_t get_opcode() {
+              const uint8_t encoded_opcode = get_byte_code();
+              if (vm_fault != VM_FAULT_NONE)
+                  return 0xFF;
+
+              // Zero is a dedicated NOP encoding. Neither side advances the
+              // opcode PRNG for NOP, keeping translator and interpreter state aligned.
+              if (encoded_opcode == 0)
+                  return NOP_OP;
+
+              uint8_t seen[OP_TOTAL] = {0};
+              unsigned unique_count = 0;
+              unsigned attempts = 0;
+
+              while (unique_count < OP_TOTAL) {
+                  if (++attempts > 4096U) {
+                      vm_set_fault(VM_FAULT_INVALID_OPCODE);
+                      return 0xFF;
+                  }
+
+                  const uint8_t candidate =
+                      (uint8_t)(xorshift32(&opcode_xorshift32_state) & 0xFFU);
+                  if (candidate == 0)
+                      continue;
+
+                  int duplicate = 0;
+                  for (unsigned i = 0; i < unique_count; ++i) {
+                      if (seen[i] == candidate) {
+                          duplicate = 1;
+                          break;
+                      }
+                  }
+                  if (duplicate)
+                      continue;
+
+                  seen[unique_count++] = candidate;
+                  if (candidate == encoded_opcode)
+                      return (uint8_t)unique_count;
+              }
+
+              vm_set_fault(VM_FAULT_INVALID_OPCODE);
+              return 0xFF;
+          }
+'''
+          replace_region(
+              "aVMPInterpreter/aVMPInterpreter.c",
+              "/* Get Opcode, Opcode encrypt by xorshift32*/\nuint8_t get_opcode() {",
+              "\n\n\nvoid vm_interpreter()",
+              interpreter_get_opcode,
+          )
+
+          test_path = Path("tools/vmp-interpreter-bounds-smoke.c")
+          test_text = test_path.read_text(encoding="utf-8")
+          test_marker = "static int test_return_clears_transient_data(void) {"
+          if test_text.count(test_marker) != 1:
+              raise SystemExit("unexpected return-test marker count")
+          opcode_test = r'''static int test_opcode_collision_sequence(void) {
+              // Seed 8 produces low bytes 8, 8, 41. The second unique byte is
+              // therefore 41 and must decode to opcode ordinal 2, not raw draw 3.
+              uint8_t code[1] = {41};
+              reset_code(code, sizeof(code));
+              opcode_xorshift32_state = 8;
+
+              if (get_opcode() != 2)
+                  return 1;
+              if (vm_fault != VM_FAULT_NONE || ip != 1)
+                  return 2;
+
+              // NOP uses the reserved zero byte and does not consume opcode state.
+              code[0] = 0;
+              reset_code(code, sizeof(code));
+              opcode_xorshift32_state = 8;
+              if (get_opcode() != NOP_OP)
+                  return 3;
+              if (opcode_xorshift32_state != 8 || vm_fault != VM_FAULT_NONE)
+                  return 4;
+              return 0;
+          }
+
+          '''
+          test_text = test_text.replace(test_marker, opcode_test + test_marker)
+
+          main_marker = r'''    result = test_return_clears_transient_data();
+              if (result != 0)
+                  return 80 + result;
+          '''
+          if test_text.count(main_marker) != 1:
+              raise SystemExit("unexpected main return-test marker count")
+          main_replacement = r'''    result = test_opcode_collision_sequence();
+              if (result != 0)
+                  return 80 + result;
+
+              result = test_return_clears_transient_data();
+              if (result != 0)
+                  return 90 + result;
+          '''
+          test_text = test_text.replace(main_marker, main_replacement)
+          test_text = test_text.replace("return 90 + result;\n\n    return 0;",
+                                        "return 100 + result;\n\n    return 0;")
+          test_path.write_text(test_text, encoding="utf-8")
+          PY
+
+      - name: Locate newest LLVM toolchain
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then LLVM_CONFIG="$(command -v llvm-config)"; fi
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Run native regression and regenerate embedded bitcode
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang)"; fi
+          "$CC" \
+            -std=c11 -Wall -Wextra -Werror \
+            -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter \
+            -Wno-strict-aliasing \
+            tools/vmp-interpreter-bounds-smoke.c \
+            -o /tmp/vmp-interpreter-bounds-smoke
+          /tmp/vmp-interpreter-bounds-smoke
+
+          "$CC" \
+            -O2 -emit-llvm -c \
+            -target x86_64-pc-windows-msvc \
+            aVMPInterpreter/aVMPInterpreter.c \
+            -o aVMPInterpreter/aVMPInterpreter.bc
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          bitcode = Path("aVMPInterpreter/aVMPInterpreter.bc").read_bytes()
+          lines = [
+              "#ifndef ALLVM_EMBEDDED_VMP_IR_H",
+              "#define ALLVM_EMBEDDED_VMP_IR_H",
+              "",
+              "#include <vector>",
+              "",
+              f"static const int binary_ir_length = {len(bitcode)};",
+              "static const char binary_ir_data[] =",
+          ]
+          for offset in range(0, len(bitcode), 16):
+              chunk = bitcode[offset:offset + 16]
+              lines.append('"' + ''.join(f"\\x{byte:02x}" for byte in chunk) + '"')
+          lines.extend([
+              ";",
+              "",
+              "static std::vector<char> get_binary_ir() {",
+              "    return std::vector<char>(binary_ir_data, binary_ir_data + binary_ir_length);",
+              "}",
+              "",
+              "#endif // ALLVM_EMBEDDED_VMP_IR_H",
+              "",
+          ])
+          Path("llvm/include/llvm/Transforms/Obfuscation/vm.h").write_text(
+              "\n".join(lines), encoding="utf-8"
+          )
+          PY
+          python3 tools/check-vmp-embed.py
+
+      - name: Remove one-time workflow and commit
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-vmp-opcode-collision-fix.yml
+          git add \
+            aVMPInterpreter/aVMPInterpreter.c \
+            aVMPInterpreter/aVMPInterpreter.bc \
+            llvm/include/llvm/Transforms/Obfuscation/vm.h \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp \
+            tools/vmp-interpreter-bounds-smoke.c
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix VMP opcode decoding across xorshift byte collisions"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

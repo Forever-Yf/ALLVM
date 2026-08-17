@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "type": "allvm-android-setup-plan",
+  "fields": {
+    "detected": "project detection result",
+    "actions": "ordered setup actions"
+  }
+}

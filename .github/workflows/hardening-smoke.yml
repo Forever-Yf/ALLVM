@@ -8,6 +8,7 @@ on:
       - "build.cpp"
       - "aVMPInterpreter/aVMPInterpreter.c"
       - "aVMPInterpreter/aVMPInterpreter.h"
+      - "aVMPInterpreter/VMPIntegrity.h"
       - "aVMPInterpreter/aVMPInterpreter.bc"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
@@ -33,6 +34,7 @@ on:
       - "build.cpp"
       - "aVMPInterpreter/aVMPInterpreter.c"
       - "aVMPInterpreter/aVMPInterpreter.h"
+      - "aVMPInterpreter/VMPIntegrity.h"
       - "aVMPInterpreter/aVMPInterpreter.bc"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
@@ -71,6 +73,7 @@ jobs:
             build.cpp
             aVMPInterpreter/aVMPInterpreter.c
             aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/VMPIntegrity.h
             aVMPInterpreter/aVMPInterpreter.bc
             llvm/include/llvm/Transforms/Obfuscation/vm.h
             tools/allvm-doctor.py
@@ -116,6 +119,7 @@ jobs:
           sparse-checkout: |
             aVMPInterpreter/aVMPInterpreter.c
             aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/VMPIntegrity.h
             aVMPInterpreter/aVMPInterpreter.bc
             llvm/include/llvm/CryptoUtils.h
             llvm/include/llvm/Transforms/Obfuscation
@@ -173,10 +177,15 @@ jobs:
           grep -q '@code_seg_size' /tmp/aVMPInterpreter.ll
           grep -q '@data_seg_size' /tmp/aVMPInterpreter.ll
           grep -q '@vm_fault' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_integrity_key0' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_block_end' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_steps_remaining' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_call_depth' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_frame_active' /tmp/aVMPInterpreter.ll
           grep -q 'llvm.trap' /tmp/aVMPInterpreter.ll
           awk '/define .*@vm_interpreter\(/,/^}/' \
             /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
-          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed)' \
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed|vm_enter_block|vm_consume_budget)' \
             /tmp/vm_interpreter.ll
 
       - name: Verify checked-in embedded interpreter
@@ -190,10 +199,15 @@ jobs:
           grep -q '@code_seg_size' /tmp/checked-aVMPInterpreter.ll
           grep -q '@data_seg_size' /tmp/checked-aVMPInterpreter.ll
           grep -q '@vm_fault' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_integrity_key0' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_block_end' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_steps_remaining' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_call_depth' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_frame_active' /tmp/checked-aVMPInterpreter.ll
           grep -q 'llvm.trap' /tmp/checked-aVMPInterpreter.ll
           awk '/define .*@vm_interpreter\(/,/^}/' \
             /tmp/checked-aVMPInterpreter.ll > /tmp/checked-vm_interpreter.ll
-          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed)' \
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed|vm_enter_block|vm_consume_budget)' \
             /tmp/checked-vm_interpreter.ll
 
       - name: Build a custom-header overlay

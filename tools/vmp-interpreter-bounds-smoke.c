@@ -53,6 +53,26 @@ static void write_le(uint8_t *buffer, uint64_t value, unsigned size) {
     }
 }
 
+static unsigned encode_const_u64(uint8_t *buffer, uint64_t value) {
+    buffer[0] = 8; // value size
+    buffer[1] = 1; // non-zero value type means an inline constant
+    write_le(buffer + 2, value, 8);
+    return 10;
+}
+
+static unsigned build_binary_code(uint8_t *code, uint8_t opcode,
+                                  uint64_t left, uint64_t right) {
+    write_le(code, 0, 8); // result offset
+    code[8] = 8;         // result width
+    code[9] = 0;         // result type is currently unused by the handler
+    code[10] = opcode;
+
+    unsigned offset = 11;
+    offset += encode_const_u64(code + offset, left);
+    offset += encode_const_u64(code + offset, right);
+    return offset;
+}
+
 static int test_valid_data_access(void) {
     uint8_t data[16];
     reset_data(data, sizeof(data));
@@ -139,6 +159,30 @@ static int test_invalid_branch_target(void) {
     return vm_fault == VM_FAULT_CODE_RANGE ? 0 : 1;
 }
 
+static int test_arithmetic_faults(void) {
+    uint8_t data[16];
+    uint8_t code[31];
+    unsigned code_size = 0;
+
+    reset_data(data, sizeof(data));
+    fill_bytes(code, sizeof(code), 0);
+    code_size = build_binary_code(code, BINOP_UDIV, 10, 0);
+    reset_code(code, code_size);
+    binaryOperator_handler();
+    if (vm_fault != VM_FAULT_ARITHMETIC)
+        return 1;
+
+    reset_data(data, sizeof(data));
+    fill_bytes(code, sizeof(code), 0);
+    code_size = build_binary_code(code, BINOP_SHL, 1, 64);
+    reset_code(code, code_size);
+    binaryOperator_handler();
+    if (vm_fault != VM_FAULT_ARITHMETIC)
+        return 2;
+
+    return 0;
+}
+
 static int test_return_clears_transient_data(void) {
     uint8_t data[8];
     uint8_t code[3] = {1, 1, 0x7AU}; // return const i8 0x7a
@@ -196,13 +240,17 @@ int main(void) {
     if (result != 0)
         return 60 + result;
 
-    result = test_return_clears_transient_data();
+    result = test_arithmetic_faults();
     if (result != 0)
         return 70 + result;
 
-    result = test_bad_interpreter_state();
+    result = test_return_clears_transient_data();
     if (result != 0)
         return 80 + result;
+
+    result = test_bad_interpreter_state();
+    if (result != 0)
+        return 90 + result;
 
     return 0;
 }

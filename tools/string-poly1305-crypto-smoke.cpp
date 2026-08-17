@@ -4,6 +4,26 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+
+template <size_t N>
+static bool equalsWithDiagnostic(const uint8_t *Actual,
+                                 const std::array<uint8_t, N> &Expected,
+                                 const char *Name) {
+  for (size_t I = 0; I < N; ++I) {
+    if (Actual[I] == Expected[I])
+      continue;
+    std::fprintf(stderr, "%s mismatch\nexpected=", Name);
+    for (uint8_t Byte : Expected)
+      std::fprintf(stderr, "%02x", static_cast<unsigned>(Byte));
+    std::fprintf(stderr, "\nactual  =");
+    for (size_t J = 0; J < N; ++J)
+      std::fprintf(stderr, "%02x", static_cast<unsigned>(Actual[J]));
+    std::fprintf(stderr, "\n");
+    return false;
+  }
+  return true;
+}
 
 static int testPoly1305Vector() {
   const std::array<uint8_t, 32> Key = {
@@ -21,7 +41,9 @@ static int testPoly1305Vector() {
   std::array<uint8_t, 16> Tag{};
   allvm_str_poly1305_auth(Tag.data(), Message.data(), Message.size(),
                           Key.data());
-  return Tag == Expected ? 0 : 1;
+  return equalsWithDiagnostic(Tag.data(), Expected, "Poly1305 RFC vector")
+             ? 0
+             : 1;
 }
 
 static int testRecordRoundTrip() {
@@ -33,12 +55,16 @@ static int testRecordRoundTrip() {
   std::array<uint8_t, 128> Record{};
   std::array<uint8_t, 80> Output{};
   constexpr uint32_t PlainSize = 80U;
+
+  // Independently generated with RFC 8439 ChaCha20-Poly1305 using:
+  // effective key = root[0..31] XOR root[32..63] = 32 bytes of 0x20,
+  // nonce a0..ab, and record bytes 0..31 as AAD.
   const std::array<uint8_t, 16> ExpectedTag = {
-      0x1c,0x70,0x6e,0xdb,0x04,0x2e,0xd3,0xab,
-      0xde,0xc3,0x0e,0x01,0xd4,0xef,0x01,0x5b};
+      0x66,0x03,0xa6,0xf3,0x87,0x4a,0x00,0xab,
+      0xb5,0x02,0x04,0x78,0x8b,0xfe,0x9c,0xec};
   const std::array<uint8_t, 16> ExpectedCipherPrefix = {
-      0x61,0xe4,0xb4,0x6f,0xbf,0x27,0xd1,0xdb,
-      0xdd,0x70,0x2f,0x1d,0x53,0x18,0xc6,0xd9};
+      0x24,0xdb,0xdb,0xc4,0x50,0xa0,0x44,0xad,
+      0x38,0x63,0xd2,0x1d,0x15,0x41,0x26,0x1a};
 
   for (unsigned I = 0; I < Root.size(); ++I) {
     Root[I] = static_cast<uint8_t>(I);
@@ -56,12 +82,13 @@ static int testRecordRoundTrip() {
     return 1;
   if (allvm_str_load32_le(Record.data() + 4U) != ALLVM_STR_VERSION)
     return 2;
-  for (unsigned I = 0; I < ExpectedTag.size(); ++I)
-    if (Record[ALLVM_STR_TAG_OFFSET + I] != ExpectedTag[I])
-      return 3;
-  for (unsigned I = 0; I < ExpectedCipherPrefix.size(); ++I)
-    if (Record[ALLVM_STR_CIPHERTEXT_OFFSET + I] != ExpectedCipherPrefix[I])
-      return 4;
+  if (!equalsWithDiagnostic(Record.data() + ALLVM_STR_TAG_OFFSET,
+                            ExpectedTag, "record-v2 tag"))
+    return 3;
+  if (!equalsWithDiagnostic(
+          Record.data() + ALLVM_STR_CIPHERTEXT_OFFSET,
+          ExpectedCipherPrefix, "record-v2 ciphertext prefix"))
+    return 4;
   if (!allvm_str_open_record_split(
           Output.data(), Record.data(), Record.size(), ShareA.data(),
           ShareB.data(), 7U, 19U, 0U, PlainSize))

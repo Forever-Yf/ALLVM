@@ -47,6 +47,16 @@ jobs:
           cat .github/patches/vmp-integrity-*.b64 > /tmp/apply-vmp-integrity.py.gz.b64
           base64 -d /tmp/apply-vmp-integrity.py.gz.b64 | gzip -d > /tmp/apply-vmp-integrity.py
           test "$(sha256sum /tmp/apply-vmp-integrity.py | cut -d' ' -f1)" = "34ce580f2452d39e69e0fe9eba5b26be963e6cd7a226c69e2ff35cfbe5d7b0ab"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("/tmp/apply-vmp-integrity.py")
+          text = path.read_text(encoding="utf-8")
+          old = 'text = replace_once(text, "GlobalVariable * code_seg_addr;\\n",\n    "GlobalVariable * code_seg_addr;\\nGlobalVariable * vm_integrity_key;\\n", path)'
+          new = 'text = replace_once(text, "GlobalVariable * data_seg_addr;\\nGlobalVariable * code_seg_addr;\\n",\n    "GlobalVariable * data_seg_addr;\\nGlobalVariable * code_seg_addr;\\nGlobalVariable * vm_integrity_key;\\n", path)'
+          if text.count(old) != 1:
+              raise SystemExit("unexpected aVMP global patch marker")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
           cp /tmp/apply-vmp-integrity.py tools/.apply-vmp-integrity.py
           python3 -m py_compile tools/.apply-vmp-integrity.py
           python3 tools/.apply-vmp-integrity.py
@@ -151,7 +161,7 @@ jobs:
           python3 tools/check-hardening.py --compile-header
           python3 tools/check-vmp-embed.py
 
-      - name: Remove staged patch and commit
+      - name: Remove one-time workflow and commit
         shell: bash
         run: |
           git rm .github/patches/vmp-integrity-*.b64

@@ -343,6 +343,16 @@ class GOVMTranslator {
             return TranslationError;
         }
 
+        uint64_t getCodeSegmentSize() const {
+            return static_cast<uint64_t>(vm_code.size());
+        }
+
+        uint64_t getDataSegmentSize() const {
+            return curr_data_offset < 0
+                       ? 0
+                       : static_cast<uint64_t>(curr_data_offset);
+        }
+
         void failTranslation(const Twine &Reason) {
             if (!TranslationFailed)
                 TranslationError = Reason.str();
@@ -1751,11 +1761,16 @@ void GOVMModifier::run() {
 class GOVMInterpreter {
     
     public:
-        GOVMInterpreter(Function * F, Function * callinst_handler) {
+        GOVMInterpreter(Function *F, Function *callinst_handler,
+                        uint64_t CodeSegmentSize,
+                        uint64_t DataSegmentSize) {
             this->Mod = F->getParent();
             this->F = F;
-            this->modDataLayout = const_cast<DataLayout *>(&this->Mod->getDataLayout());
+            this->modDataLayout =
+                const_cast<DataLayout *>(&this->Mod->getDataLayout());
             this->callinst_handler = callinst_handler;
+            this->CodeSegmentSize = CodeSegmentSize;
+            this->DataSegmentSize = DataSegmentSize;
 
             construct_gv();
         }
@@ -1765,10 +1780,15 @@ class GOVMInterpreter {
         DataLayout * modDataLayout;
 
         Function *callinst_handler;
+        uint64_t CodeSegmentSize = 0;
+        uint64_t DataSegmentSize = 0;
 
         GlobalVariable *pointer_size_gv;
         GlobalVariable *opcode_xorshift32_state;
         GlobalVariable *vm_code_state;
+        GlobalVariable *code_seg_size_gv;
+        GlobalVariable *data_seg_size_gv;
+        GlobalVariable *vm_fault_gv;
 
         virtual bool run ();
         virtual void construct_gv ();
@@ -1896,6 +1916,28 @@ void GOVMInterpreter::construct_gv() {
                 false,  GlobalValue::InternalLinkage, 
                 vm_code_state_initGV, "vm_code_state_"+F->getName());
     vm_code_state->setThreadLocal(true);
+
+    Constant *code_size_init = ConstantInt::get(
+        Type::getInt64Ty(Mod->getContext()), CodeSegmentSize);
+    code_seg_size_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage, code_size_init,
+        "code_seg_size_" + F->getName());
+
+    Constant *data_size_init = ConstantInt::get(
+        Type::getInt64Ty(Mod->getContext()), DataSegmentSize);
+    data_seg_size_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage, data_size_init,
+        "data_seg_size_" + F->getName());
+
+    Constant *fault_init = ConstantInt::get(
+        Type::getInt32Ty(Mod->getContext()), 0);
+    vm_fault_gv = new GlobalVariable(
+        *Mod, Type::getInt32Ty(Mod->getContext()), false,
+        GlobalValue::InternalLinkage, fault_init,
+        "vm_fault_" + F->getName());
+    vm_fault_gv->setThreadLocal(true);
 }
 
 // Function *govm_interpreter;
@@ -1908,8 +1950,14 @@ bool GOVMInterpreter::run() {
     }
 
     // replace GlobalVariable 
-    std::vector<std::string> gv_list = {"ip",  "data_seg_addr", "code_seg_addr", "pointer_size", "opcode_xorshift32_state", "vm_code_state"};
-    std::vector<GlobalVariable *> new_gv_list = {ip,  data_seg_addr, code_seg_addr, pointer_size_gv, opcode_xorshift32_state, vm_code_state};
+    std::vector<std::string> gv_list = {
+        "ip", "data_seg_addr", "code_seg_addr", "pointer_size",
+        "opcode_xorshift32_state", "vm_code_state",
+        "code_seg_size", "data_seg_size", "vm_fault"};
+    std::vector<GlobalVariable *> new_gv_list = {
+        ip, data_seg_addr, code_seg_addr, pointer_size_gv,
+        opcode_xorshift32_state, vm_code_state, code_seg_size_gv,
+        data_seg_size_gv, vm_fault_gv};
     for (unsigned i = 0; i < gv_list.size(); i++) {
         GlobalVariable *old_gv = interpreter_module->getGlobalVariable(gv_list[i]);
         if (!old_gv) {
@@ -2154,6 +2202,9 @@ static void cleanupFailedVMP(GOVMTranslator &Translator,
         eraseUnusedGlobal(Interpreter->pointer_size_gv);
         eraseUnusedGlobal(Interpreter->opcode_xorshift32_state);
         eraseUnusedGlobal(Interpreter->vm_code_state);
+        eraseUnusedGlobal(Interpreter->code_seg_size_gv);
+        eraseUnusedGlobal(Interpreter->data_seg_size_gv);
+        eraseUnusedGlobal(Interpreter->vm_fault_gv);
     }
     eraseUnusedGlobal(gv_code_seg);
     eraseUnusedGlobal(gv_data_seg);
@@ -2174,7 +2225,9 @@ static bool runVMPOnFunction(Function &F) {
         return false;
     }
 
-    GOVMInterpreter Interpreter(&F, Translator.get_callinst_handler());
+    GOVMInterpreter Interpreter(
+        &F, Translator.get_callinst_handler(),
+        Translator.getCodeSegmentSize(), Translator.getDataSegmentSize());
     if (!Interpreter.run()) {
         errs() << "[VMP] Embedded interpreter setup failed for '"
                << F.getName() << "'\n";

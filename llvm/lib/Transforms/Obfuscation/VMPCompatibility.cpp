@@ -435,8 +435,9 @@ analyzeVMPFunction(const Function &F, const VMPResourceLimits &Limits) {
     reject(Result, "naked 函数");
   if (F.hasFnAttribute(Attribute::ReturnsTwice))
     reject(Result, "returns_twice 函数");
-  if (PointerSize == 0 || PointerSize > 8)
-    reject(Result, "目标指针宽度不适用于 uint64 VMP ABI");
+  if (PointerSize != 8)
+    reject(Result,
+           "当前嵌入解释器的 uintptr_t ABI 仅支持 64 位目标");
 
   std::string TypeReason;
   if (!supportedValueType(DL, F.getReturnType(), TypeReason))

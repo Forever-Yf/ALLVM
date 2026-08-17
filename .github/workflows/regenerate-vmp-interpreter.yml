@@ -1,0 +1,139 @@
+name: Regenerate embedded VMP interpreter
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/regenerate-vmp-interpreter.yml
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out interpreter artifacts
+        uses: actions/checkout@v4
+        with:
+          ref: hardening/p0-secure-seeding-doctor
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/regenerate-vmp-interpreter.yml
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/aVMPInterpreter.bc
+            llvm/include/llvm/Transforms/Obfuscation/vm.h
+          sparse-checkout-cone-mode: false
+
+      - name: Locate LLVM tools
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then
+            LLVM_CONFIG="$(command -v llvm-config || true)"
+          fi
+          if [ -z "$LLVM_CONFIG" ]; then
+            echo "No llvm-config was found" >&2
+            exit 1
+          fi
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Compile interpreter bitcode
+        shell: bash
+        run: |
+          CLANG="$LLVM_BINDIR/clang"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CLANG" ]; then CLANG="$(command -v clang)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          "$CLANG" \
+            -O2 -emit-llvm -c \
+            -target x86_64-pc-windows-msvc \
+            aVMPInterpreter/aVMPInterpreter.c \
+            -o aVMPInterpreter/aVMPInterpreter.bc
+          "$LLVM_DIS" aVMPInterpreter/aVMPInterpreter.bc \
+            -o /tmp/aVMPInterpreter.ll
+          grep -q '@code_seg_size' /tmp/aVMPInterpreter.ll
+          grep -q '@data_seg_size' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_fault' /tmp/aVMPInterpreter.ll
+          grep -q 'llvm.trap' /tmp/aVMPInterpreter.ll
+          awk '/define .*@vm_interpreter\(/,/^}/' \
+            /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed)' \
+            /tmp/vm_interpreter.ll
+
+      - name: Generate vm.h from exact bitcode bytes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          bitcode_path = Path('aVMPInterpreter/aVMPInterpreter.bc')
+          output_path = Path('llvm/include/llvm/Transforms/Obfuscation/vm.h')
+          data = bitcode_path.read_bytes()
+
+          lines = [
+              '#ifndef ALLVM_EMBEDDED_VMP_IR_H',
+              '#define ALLVM_EMBEDDED_VMP_IR_H',
+              '',
+              '#include <vector>',
+              '',
+              f'static const int binary_ir_length = {len(data)};',
+              'static const char binary_ir_data[] =',
+          ]
+          for offset in range(0, len(data), 16):
+              chunk = data[offset:offset + 16]
+              escaped = ''.join(f'\\x{byte:02x}' for byte in chunk)
+              lines.append(f'"{escaped}"')
+          lines.extend(
+              [
+                  ';',
+                  '',
+                  'static std::vector<char> get_binary_ir() {',
+                  '  return std::vector<char>(binary_ir_data,',
+                  '                           binary_ir_data + binary_ir_length);',
+                  '}',
+                  '',
+                  '#endif // ALLVM_EMBEDDED_VMP_IR_H',
+                  '',
+              ]
+          )
+          output_path.write_text('\n'.join(lines), encoding='utf-8')
+          PY
+
+      - name: Verify embedded header is byte-for-byte identical
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          bitcode = Path('aVMPInterpreter/aVMPInterpreter.bc').read_bytes()
+          header = Path('llvm/include/llvm/Transforms/Obfuscation/vm.h').read_text(
+              encoding='utf-8'
+          )
+          length_match = re.search(r'binary_ir_length = (\d+);', header)
+          if not length_match or int(length_match.group(1)) != len(bitcode):
+              raise SystemExit('embedded bitcode length does not match vm.h')
+          block = header.split('static const char binary_ir_data[] =', 1)[1]
+          block = block.split(';', 1)[0]
+          embedded = bytes(int(value, 16) for value in re.findall(r'\\x([0-9a-fA-F]{2})', block))
+          if embedded != bitcode:
+              raise SystemExit('vm.h bytes differ from aVMPInterpreter.bc')
+          PY
+
+      - name: Remove one-time workflow
+        run: git rm .github/workflows/regenerate-vmp-interpreter.yml
+
+      - name: Commit regenerated artifacts
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            aVMPInterpreter/aVMPInterpreter.bc \
+            llvm/include/llvm/Transforms/Obfuscation/vm.h
+          git commit -m "vmp: regenerate bounded embedded interpreter"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

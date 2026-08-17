@@ -1,0 +1,2 @@
+P5.2 planner complete.
+Next: implement allvm android setup execution layer.

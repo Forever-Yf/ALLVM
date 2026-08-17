@@ -18,6 +18,7 @@ jobs:
         with:
           fetch-depth: 0
           sparse-checkout: |
+            configs/profiles
             tools/allvm.py
             tools/test-allvm-cli.py
             tools/apply-usability-utf8.py

@@ -3,6 +3,11 @@ name: Usability smoke checks
 on:
   pull_request:
     paths:
+      - "README.md"
+      - "allvm.py"
+      - "allvm.cmd"
+      - "allvm.ps1"
+      - "allvm.sh"
       - "configs/profiles/**"
       - "docs/ALLVM_USAGE_CN.md"
       - "tools/allvm.py"
@@ -12,6 +17,11 @@ on:
     branches:
       - "usability/**"
     paths:
+      - "README.md"
+      - "allvm.py"
+      - "allvm.cmd"
+      - "allvm.ps1"
+      - "allvm.sh"
       - "configs/profiles/**"
       - "docs/ALLVM_USAGE_CN.md"
       - "tools/allvm.py"
@@ -33,6 +43,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: |
+            allvm.py
+            allvm.sh
             configs/profiles
             tools/allvm.py
             tools/allvm-doctor.py
@@ -42,9 +54,9 @@ jobs:
           python-version: "3.9"
       - name: Compile and exercise public entrypoints
         run: |
-          python -m py_compile tools/allvm.py tools/allvm-doctor.py
-          python tools/allvm.py --version
-          python tools/allvm.py profile list
+          python -m py_compile allvm.py tools/allvm.py tools/allvm-doctor.py
+          python allvm.py --version
+          sh allvm.sh profile list
           python tools/allvm.py render --profile compat --format cmake > /tmp/compat.cmake
           python tools/allvm.py render --profile balanced --format ndk-build > /tmp/balanced.mk
           python tools/allvm.py render --profile strong --format json > /tmp/strong.json
@@ -59,6 +71,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: |
+            allvm.py
+            allvm.sh
             configs/profiles
             tools/allvm.py
             tools/allvm-doctor.py
@@ -69,7 +83,11 @@ jobs:
           python-version: "3.13"
       - name: Run standard-library regression suite
         run: |
-          python -m py_compile tools/allvm.py tools/test-allvm-cli.py
+          python -m py_compile allvm.py tools/allvm.py tools/test-allvm-cli.py
+          python allvm.py profile list --json > /tmp/profiles.json
+          sh allvm.sh render --profile balanced --format shell > /tmp/flags.txt
+          grep -q 'balanced' /tmp/profiles.json
+          grep -q 'irobf-fla' /tmp/flags.txt
           python tools/test-allvm-cli.py
 
   windows-regression:
@@ -79,6 +97,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: |
+            allvm.py
+            allvm.cmd
+            allvm.ps1
             configs/profiles
             tools/allvm.py
             tools/allvm-doctor.py
@@ -90,5 +111,9 @@ jobs:
       - name: Run standard-library regression suite
         shell: pwsh
         run: |
-          python -m py_compile tools/allvm.py tools/test-allvm-cli.py
+          python -m py_compile allvm.py tools/allvm.py tools/test-allvm-cli.py
+          python allvm.py --version
+          cmd /c allvm.cmd profile list
+          ./allvm.ps1 render --profile compat --format json | Out-File -Encoding utf8 $env:RUNNER_TEMP\compat.json
+          Select-String -Path $env:RUNNER_TEMP\compat.json -Pattern '"profile": "compat"'
           python tools/test-allvm-cli.py

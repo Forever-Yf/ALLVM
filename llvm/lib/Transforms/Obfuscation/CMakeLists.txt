@@ -9,7 +9,7 @@ add_llvm_library(LLVMObfuscation
   IndirectGlobalVariable.cpp
   Flattening.cpp
   AuthenticatedStringIR.cpp
-  StringEncryptionAuthenticated.cpp
+  StringEncryptionAuthenticatedV2.cpp
   LegacyLowerSwitch.cpp
   ConstantIntEncryption.cpp
   ConstantFPEncryption.cpp

@@ -1,0 +1,89 @@
+name: Apply Windows UTF-8 CLI fix
+
+on:
+  push:
+    branches:
+      - usability/p1-cli-presets-overlay
+    paths:
+      - .github/workflows/patch-usability-utf8.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            tools/allvm.py
+            tools/test-allvm-cli.py
+          sparse-checkout-cone-mode: false
+
+      - name: Patch UTF-8 stream handling and tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cli = Path("tools/allvm.py")
+          text = cli.read_text(encoding="utf-8")
+          marker = 'PROJECT_CONFIG = "allvm.json"\n\n\nclass CliError'
+          replacement = '''PROJECT_CONFIG = "allvm.json"
+
+
+def configure_utf8_stdio() -> None:
+    """Use deterministic UTF-8 for redirected Windows and POSIX output."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (LookupError, OSError):
+            pass
+
+
+class CliError'''
+          if text.count(marker) != 1:
+              raise SystemExit("unexpected allvm.py constant marker")
+          text = text.replace(marker, replacement, 1)
+
+          main_marker = '''def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+'''
+          main_replacement = '''def main(argv: Optional[Sequence[str]] = None) -> int:
+    configure_utf8_stdio()
+    parser = build_parser()
+'''
+          if text.count(main_marker) != 1:
+              raise SystemExit("unexpected allvm.py main marker")
+          cli.write_text(text.replace(main_marker, main_replacement, 1), encoding="utf-8")
+
+          tests = Path("tools/test-allvm-cli.py")
+          test_text = tests.read_text(encoding="utf-8")
+          old = '''            text=True,
+            check=False,
+            timeout=90,
+'''
+          new = '''            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=90,
+'''
+          if test_text.count(old) != 1:
+              raise SystemExit("unexpected subprocess marker in CLI tests")
+          test_text = test_text.replace(old, new, 1)
+          tests.write_text(test_text, encoding="utf-8")
+          PY
+          python3 -m py_compile tools/allvm.py tools/test-allvm-cli.py
+
+      - name: Commit fix
+        run: |
+          git add tools/allvm.py tools/test-allvm-cli.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix UTF-8 output for redirected Windows CLI"
+          git push origin HEAD:usability/p1-cli-presets-overlay

@@ -1,0 +1,55 @@
+name: Apply VMP runtime docs and regression checks
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/apply-vmp-runtime-docs-checks.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out documentation and checker files
+        uses: actions/checkout@v4
+        with:
+          ref: hardening/p0-secure-seeding-doctor
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/apply-vmp-runtime-docs-checks.yml
+            README.md
+            docs/ALLVM_HARDENING.md
+            tools/check-hardening.py
+            tools/_apply_vmp_runtime_docs_checks.py
+          sparse-checkout-cone-mode: false
+
+      - name: Apply exact runtime documentation and checker edits
+        run: python3 tools/_apply_vmp_runtime_docs_checks.py
+
+      - name: Validate generated files
+        shell: bash
+        run: |
+          python3 -m py_compile tools/check-hardening.py
+          grep -q '运行时段边界与 fail-closed' README.md
+          grep -q '当前嵌入解释器仅支持 64 位目标' README.md
+          grep -q 'VM_FAULT_CODE_RANGE' docs/ALLVM_HARDENING.md
+          grep -q 'VMP 原生边界测试' tools/check-hardening.py
+          grep -q 'VMP 嵌入产物检查器' tools/check-hardening.py
+
+      - name: Remove one-time helpers
+        run: |
+          git rm .github/workflows/apply-vmp-runtime-docs-checks.yml
+          git rm tools/_apply_vmp_runtime_docs_checks.py
+
+      - name: Commit documentation and regression checks
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/ALLVM_HARDENING.md tools/check-hardening.py
+          git commit -m "docs: document VMP runtime bounds and embedded artifacts"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

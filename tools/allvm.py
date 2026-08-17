@@ -33,6 +33,18 @@ OVERLAY_MANIFEST = ".allvm-overlay.json"
 PROJECT_CONFIG = "allvm.json"
 
 
+def configure_utf8_stdio() -> None:
+    """Use deterministic UTF-8 for redirected Windows and POSIX output."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (LookupError, OSError):
+            pass
+
+
 class CliError(RuntimeError):
     """A user-facing command failure."""
 
@@ -994,6 +1006,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

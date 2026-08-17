@@ -776,46 +776,49 @@ void return_handler() {
 #endif
 /* Get Opcode, Opcode encrypt by xorshift32*/
 uint8_t get_opcode() {
-    uint8_t cnt = 0;
-    uint8_t his[OP_TOTAL+1];
-
-    uint8_t curr_byte = get_byte_code();
-    unsigned attempts = 0;
+    const uint8_t encoded_opcode = get_byte_code();
     if (vm_fault != VM_FAULT_NONE)
         return 0xFF;
 
-    for (int i = 0; i < OP_TOTAL+1; i++) {
+    // Zero is a dedicated NOP encoding. Neither side advances the opcode PRNG
+    // for NOP, keeping translator and interpreter state aligned.
+    if (encoded_opcode == 0)
+        return NOP_OP;
+
+    uint8_t seen[OP_TOTAL] = {0};
+    unsigned unique_count = 0;
+    unsigned attempts = 0;
+
+    while (unique_count < OP_TOTAL) {
         if (++attempts > 4096U) {
             vm_set_fault(VM_FAULT_INVALID_OPCODE);
             return 0xFF;
         }
-        uint8_t tmp =
+
+        const uint8_t candidate =
             (uint8_t)(xorshift32(&opcode_xorshift32_state) & 0xFFU);
-        // printf("curr_byte: %d, tmp: %d\n", curr_byte, tmp);
-        if (tmp == curr_byte) {
-            // find
-            return i+1;
-        }
-        
-        // privent xorshift32&0xFF conflict
-        uint8_t flag = 1;
-        for (int j=0; j < i; j++) {
-            if (his[j] == tmp) {
-                flag = 0;
+        if (candidate == 0)
+            continue;
+
+        int duplicate = 0;
+        for (unsigned i = 0; i < unique_count; ++i) {
+            if (seen[i] == candidate) {
+                duplicate = 1;
+                break;
             }
         }
+        if (duplicate)
+            continue;
 
-        if (flag == 1) {
-            his[i] = tmp;
-        }
-        else {
-            i--;
-        }
+        seen[unique_count++] = candidate;
+        if (candidate == encoded_opcode)
+            return (uint8_t)unique_count;
     }
 
     vm_set_fault(VM_FAULT_INVALID_OPCODE);
     return 0xFF;
 }
+
 
 
 void vm_interpreter() {

@@ -184,6 +184,29 @@ static int test_arithmetic_faults(void) {
     return 0;
 }
 
+static int test_opcode_collision_sequence(void) {
+    // Seed 8 produces low bytes 8, 8, 41. The second unique byte is
+    // therefore 41 and must decode to opcode ordinal 2, not raw draw 3.
+    uint8_t code[1] = {41};
+    reset_code(code, sizeof(code));
+    opcode_xorshift32_state = 8;
+
+    if (get_opcode() != 2)
+        return 1;
+    if (vm_fault != VM_FAULT_NONE || ip != 1)
+        return 2;
+
+    // NOP uses the reserved zero byte and does not consume opcode state.
+    code[0] = 0;
+    reset_code(code, sizeof(code));
+    opcode_xorshift32_state = 8;
+    if (get_opcode() != NOP_OP)
+        return 3;
+    if (opcode_xorshift32_state != 8 || vm_fault != VM_FAULT_NONE)
+        return 4;
+    return 0;
+}
+
 static int test_return_clears_transient_data(void) {
     uint8_t data[8];
     uint8_t code[3] = {1, 1, 0x7AU}; // return const i8 0x7a
@@ -245,13 +268,17 @@ int main(void) {
     if (result != 0)
         return 70 + result;
 
-    result = test_return_clears_transient_data();
+    result = test_opcode_collision_sequence();
     if (result != 0)
         return 80 + result;
 
-    result = test_bad_interpreter_state();
+    result = test_return_clears_transient_data();
     if (result != 0)
         return 90 + result;
+
+    result = test_bad_interpreter_state();
+    if (result != 0)
+        return 100 + result;
 
     return 0;
 }

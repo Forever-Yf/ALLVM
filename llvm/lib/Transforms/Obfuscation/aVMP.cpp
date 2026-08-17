@@ -489,33 +489,41 @@ class GOVMTranslator {
             }
         }
 
-        // pack one byte opcode
-        std::vector<uint8_t> pack_op(uint8_t op){
-            uint8_t res = 0;
-            std::vector<uint8_t> his;
-            const int MAX_RETRIES = 1000;  // 最大重试次数
-            int total_retries = 0;
-            
-            for (int i = 0; i < op; i++) {
-                if (total_retries >= MAX_RETRIES) {
-                    // 如果重试次数过多，直接使用当前值
-                    res = xorshift32(&xorshift32_state) & 0xFF;
-                    break;
-                }
-                
-                uint8_t tmp = xorshift32(&xorshift32_state) & 0xFF;
-                // privent xorshift32&0xFF conflict
-                if (find(his.begin(), his.end(), tmp) == his.end()) {
-                    his.push_back(tmp);
-                    res = tmp;
-                }
-                else {
-                    i--;
-                    total_retries++;
-                }
+        // Encode one opcode as its ordinal in a collision-free xorshift byte sequence.
+        // Byte zero is reserved for NOP and therefore does not advance the state.
+        std::vector<uint8_t> pack_op(uint8_t op) {
+            if (op == NOP_OP)
+                return {0};
+            if (op > OP_TOTAL) {
+                failTranslation(Twine("opcode ") + Twine(op) +
+                                " exceeds the legacy VMP opcode range");
+                return {};
             }
-            return pack(res, 1);
+
+            uint8_t seen[256] = {};
+            uint8_t result = 0;
+            unsigned unique_count = 0;
+            unsigned attempts = 0;
+
+            while (unique_count < op) {
+                if (++attempts > 4096U) {
+                    failTranslation("unable to construct a collision-free opcode sequence");
+                    return {};
+                }
+
+                const uint8_t candidate =
+                    static_cast<uint8_t>(xorshift32(&xorshift32_state) & 0xFFU);
+                if (candidate == 0 || seen[candidate] != 0)
+                    continue;
+
+                seen[candidate] = 1;
+                result = candidate;
+                ++unique_count;
+            }
+
+            return {result};
         }
+
 
         // pack a Constant to a vector
         std::vector<uint8_t> pack_const_value(Value * const_value){

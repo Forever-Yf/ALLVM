@@ -1,0 +1,49 @@
+name: Fix staged VMP patch part
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/fix-vmp-patch-part.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/patches
+            .github/workflows/apply-vmp-block-integrity.yml
+            .github/workflows/check-vmp-patch-parts.yml
+            .github/workflows/fix-vmp-patch-part.yml
+          sparse-checkout-cone-mode: false
+      - name: Repair, verify, and retrigger
+        shell: bash
+        run: |
+          truncate -s -1 .github/patches/vmp-integrity-00.b64
+          test "$(wc -c < .github/patches/vmp-integrity-00.b64)" = "6000"
+          test "$(sha256sum .github/patches/vmp-integrity-00.b64 | cut -d' ' -f1)" = "58ae88c6c5ed13221f632a532e7d03d9ebf525da2f1634598202227b577e7176"
+          test "$(sha256sum .github/patches/vmp-integrity-01.b64 | cut -d' ' -f1)" = "71e421a9bb291ea6fa65f537ea5849d38716a43bd2bdb2871ae3c35b797309a0"
+          test "$(sha256sum .github/patches/vmp-integrity-02.b64 | cut -d' ' -f1)" = "1d1b15bfa05f16372848a5999b5804b4479ca42e52f3f9dab05bc47f2ba6da29"
+          cat .github/patches/vmp-integrity-*.b64 > /tmp/patch.b64
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+          raw = gzip.decompress(base64.b64decode(Path('/tmp/patch.b64').read_bytes(), validate=True))
+          assert len(raw) == 50326
+          assert hashlib.sha256(raw).hexdigest() == '34ce580f2452d39e69e0fe9eba5b26be963e6cd7a226c69e2ff35cfbe5d7b0ab'
+          PY
+          printf '\n# integrity patch retry\n' >> .github/workflows/apply-vmp-block-integrity.yml
+          git rm .github/workflows/check-vmp-patch-parts.yml
+          git rm .github/workflows/fix-vmp-patch-part.yml
+          git add .github/patches/vmp-integrity-00.b64 .github/workflows/apply-vmp-block-integrity.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix staged VMP integrity patch boundary"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

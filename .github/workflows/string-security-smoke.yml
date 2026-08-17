@@ -39,19 +39,21 @@ concurrency:
 
 jobs:
   linux-runtime:
-    name: Linux primitives and generated LLVM runtime
+    name: Linux primitives, generated runtime and pass integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h
-            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringIR.h
+            llvm/include/llvm/CryptoUtils.h
+            llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
+            llvm/lib/Transforms/Obfuscation/CMakeLists.txt
             tools/string-crypto-smoke.cpp
             tools/string-runtime-ir-smoke.cpp
-          sparse-checkout-cone-mode: false
+          sparse-checkout-cone-mode: true
 
       - name: Locate the newest installed LLVM toolchain
         shell: bash
@@ -112,6 +114,26 @@ jobs:
           grep -q '@__allvm_str_chacha_block_v1' /tmp/string-runtime.ll
           grep -q '@__allvm_str_tag_v1' /tmp/string-runtime.ll
           grep -q 'llvm.memset' /tmp/string-runtime.ll
+
+      - name: Compile authenticated string pass against LLVM headers
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          "$CXX" \
+            -Illvm/include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra -Werror \
+            -Wno-unused-parameter \
+            -Wno-deprecated-declarations \
+            -Wno-sign-compare \
+            -fsyntax-only \
+            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
+          grep -q 'AuthenticatedStringIR.cpp' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          grep -q 'StringEncryptionAuthenticated.cpp' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          ! grep -q '^  StringEncryption.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
 
   windows-primitives:
     name: Windows authenticated record vectors

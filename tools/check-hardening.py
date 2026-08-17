@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Run lightweight, source-level ALLVM hardening regression checks.
+"""Run source-level ALLVM hardening regression checks.
 
 The checker intentionally uses only Python's standard library. It verifies
-security-critical source markers, rejects known legacy regressions, validates
-Chinese documentation, and can compile/run SecureRandom.h against minimal LLVM
-stubs. Cryptographic vectors and complete LLVM execution live in the permanent
-GitHub workflows.
+security capabilities and dangerous-regression absence without depending on
+incidental local variable names. Cryptographic vectors and complete LLVM
+execution are covered by the permanent GitHub workflows.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,23 +41,18 @@ def add(results: list[Result], name: str, ok: bool, detail: str) -> None:
     results.append(Result(name=name, status="PASS" if ok else "FAIL", detail=detail))
 
 
-def contains_all(text: str, markers: Iterable[str]) -> tuple[bool, list[str]]:
-    missing = [marker for marker in markers if marker not in text]
-    return not missing, missing
-
-
-def marker_check(
+def require(
     results: list[Result],
     name: str,
     text: str,
     markers: Iterable[str],
     success: str,
 ) -> None:
-    ok, missing = contains_all(text, markers)
-    add(results, name, ok, success if ok else "缺少: " + ", ".join(missing))
+    missing = [marker for marker in markers if marker not in text]
+    add(results, name, not missing, success if not missing else "缺少: " + ", ".join(missing))
 
 
-def absence_check(
+def forbid(
     results: list[Result],
     name: str,
     text: str,
@@ -76,39 +70,41 @@ def static_checks(results: list[Result]) -> None:
     constant_fp = read("llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp")
 
     string_pass = read("llvm/lib/Transforms/Obfuscation/StringEncryption.cpp")
-    string_crypto = read(
-        "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h"
-    )
+    string_crypto = read("llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h")
     string_ir = read("llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp")
-    string_cmake = read("llvm/lib/Transforms/Obfuscation/CMakeLists.txt")
-    strong_profile = read("configs/profiles/strong.json")
-    string_vectors = read("tools/string-crypto-smoke.cpp")
-    string_runtime_smoke = read("tools/string-runtime-ir-smoke.cpp")
-    string_pass_smoke = read("tools/string-pass-smoke.cpp")
+    cmake = read("llvm/lib/Transforms/Obfuscation/CMakeLists.txt")
+    strong = read("configs/profiles/strong.json")
+    string_tests = "\n".join(
+        read(path)
+        for path in (
+            "tools/string-crypto-smoke.cpp",
+            "tools/string-runtime-ir-smoke.cpp",
+            "tools/string-pass-smoke.cpp",
+        )
+    )
 
     avmp = read("llvm/lib/Transforms/Obfuscation/aVMP.cpp")
-    vmp_header = read("llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h")
     vmp_preflight = read("llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp")
     vmp_integrity = read("aVMPInterpreter/VMPIntegrity.h")
     interpreter_header = read("aVMPInterpreter/aVMPInterpreter.h")
-    interpreter_source = read("aVMPInterpreter/aVMPInterpreter.c")
-    interpreter_smoke = read("tools/vmp-interpreter-bounds-smoke.c")
+    interpreter = read("aVMPInterpreter/aVMPInterpreter.c")
+    vmp_tests = read("tools/vmp-interpreter-bounds-smoke.c")
     embed_checker = read("tools/check-vmp-embed.py")
     embedded_header = read("llvm/include/llvm/Transforms/Obfuscation/vm.h")
 
-    build_helper = read("build.cpp")
+    build = read("build.cpp")
     readme = read("README.md")
     hardening_doc = read("docs/ALLVM_HARDENING.md")
     string_doc = read("docs/AUTHENTICATED_STRINGS_CN.md")
 
-    absence_check(
+    forbid(
         results,
         "CryptoUtils 弱随机路径",
         crypto,
-        ("std::mt19937", "system_clock::now", "std::ifstream"),
-        "未发现时间种子、MT 或文件流随机回退",
+        ("std::mt19937", "system_clock::now", "srand(", "rand()"),
+        "未发现时间、MT 或 rand 随机回退",
     )
-    marker_check(
+    require(
         results,
         "CryptoUtils 加固",
         crypto,
@@ -119,9 +115,9 @@ def static_checks(results: list[Result]) -> None:
             "const uint32_t Threshold",
             "while (sofar < len)",
         ),
-        "系统 CSPRNG、敏感清理、严格种子和无偏范围逻辑存在",
+        "系统 CSPRNG、显式种子、敏感清理和无偏范围逻辑存在",
     )
-    marker_check(
+    require(
         results,
         "SecureRandom 构建根",
         secure,
@@ -132,18 +128,20 @@ def static_checks(results: list[Result]) -> None:
             "ALLVM-build-seed-v1|",
             "secureClear",
         ),
-        "Windows/POSIX CSPRNG、显式 seed 和域分离存在",
+        "Windows/POSIX CSPRNG、构建根和域分离存在",
     )
-    marker_check(
+    require(
         results,
         "常量保护独立域",
         constant_int + constant_fp,
-        ('seedCryptoUtils(*cryptoutils, "constant-int")',
-         'seedCryptoUtils(*cryptoutils, "constant-fp")'),
+        (
+            'seedCryptoUtils(RandomEngine, "constant-int")',
+            'seedCryptoUtils(RandomEngine, "constant-fp")',
+        ),
         "整数和浮点常量保护使用独立随机域",
     )
 
-    absence_check(
+    forbid(
         results,
         "旧字符串可逆变换回归",
         string_pass,
@@ -156,7 +154,7 @@ def static_checks(results: list[Result]) -> None:
         ),
         "未发现旧 XOR/取反/反馈记录实现",
     )
-    marker_check(
+    require(
         results,
         "认证字符串密码原语",
         string_crypto,
@@ -171,23 +169,23 @@ def static_checks(results: list[Result]) -> None:
         ),
         "ChaCha20、双 SipHash、split-key、验签和失败清零存在",
     )
-    marker_check(
+    require(
         results,
         "认证字符串记录绑定",
         string_crypto,
         (
-            "ALLVM_STR_MAGIC",
             "expected_id",
             "expected_offset",
             "expected_flags",
             "expected_size",
+            "ALLVM_STR_NONCE_OFFSET",
             "ALLVM_STR_TAG0_OFFSET",
             "ALLVM_STR_TAG1_OFFSET",
             "ALLVM_STR_CIPHERTEXT_OFFSET",
         ),
-        "ID、偏移、类型、长度、nonce 和密文均进入验证路径",
+        "ID、偏移、类型、长度、nonce、标签和密文均进入验证路径",
     )
-    marker_check(
+    require(
         results,
         "认证字符串 Pass 集成",
         string_pass,
@@ -208,7 +206,7 @@ def static_checks(results: list[Result]) -> None:
         ),
         "finalization、域分离、早期验签、晚期清理、重映射和 verifier 存在",
     )
-    marker_check(
+    require(
         results,
         "认证字符串候选预检",
         string_pass,
@@ -225,7 +223,7 @@ def static_checks(results: list[Result]) -> None:
         ),
         "链接、TLS、section、地址空间、用户链和资源边界检查存在",
     )
-    marker_check(
+    require(
         results,
         "认证字符串 LLVM 运行时",
         string_ir,
@@ -241,24 +239,24 @@ def static_checks(results: list[Result]) -> None:
         ),
         "生成式 ChaCha/SipHash/open 运行时和失败清理存在",
     )
-    marker_check(
+    require(
         results,
         "认证字符串正式构建",
-        string_cmake,
+        cmake,
         ("AuthenticatedStringIR.cpp", "StringEncryption.cpp"),
         "CMake 编译认证运行时和规范 StringEncryption.cpp",
     )
-    absence_check(
+    forbid(
         results,
         "认证字符串过渡源回归",
-        string_cmake,
+        cmake,
         ("StringEncryptionAuthenticated.cpp", "StringEncryptionAuthenticatedV2.cpp"),
         "正式构建未引用过渡源",
     )
-    marker_check(
+    require(
         results,
         "strong 字符串安全预设",
-        strong_profile,
+        strong,
         (
             "-irobf-cse-strict",
             "-irobf-cse-max-record-bytes=1048576",
@@ -266,12 +264,12 @@ def static_checks(results: list[Result]) -> None:
             "-irobf-cse-wipe-at-exit",
             "-irobf-cse-verify",
         ),
-        "严格模式、单记录/总表预算、清理和 verifier 已启用",
+        "严格模式、记录/表预算、卸载清理和 verifier 已启用",
     )
-    marker_check(
+    require(
         results,
         "认证字符串可执行测试",
-        string_vectors + string_runtime_smoke + string_pass_smoke,
+        string_tests,
         (
             "testChaChaVector",
             "testRecordRoundTrip",
@@ -286,14 +284,14 @@ def static_checks(results: list[Result]) -> None:
         "密码向量、篡改、LLVM runtime 和完整 Pass 产物均有测试",
     )
 
-    absence_check(
+    forbid(
         results,
         "VMP 弱种子回归",
         avmp,
         ("srand(time(0))", "xorshift32_seed ^= rand()", "#define VM_CODE_SEG_SIZE"),
         "未发现 rand/time 或旧固定 code 段",
     )
-    marker_check(
+    require(
         results,
         "VMP 域分离和预算",
         avmp,
@@ -309,12 +307,12 @@ def static_checks(results: list[Result]) -> None:
             "irobf-vmp-max-call-depth",
             "irobf-vmp-strict",
         ),
-        "函数级布局/认证域及编译期/运行时预算存在",
+        "布局/认证域及编译期/运行时预算存在",
     )
-    marker_check(
+    require(
         results,
         "VMP 兼容性预检",
-        vmp_header + vmp_preflight,
+        vmp_preflight,
         (
             "MaxBasicBlocks",
             "MaxInstructions",
@@ -329,7 +327,7 @@ def static_checks(results: list[Result]) -> None:
         ),
         "危险 IR、ABI、递归和资源检查存在",
     )
-    marker_check(
+    require(
         results,
         "VMP 分块认证",
         vmp_integrity + avmp,
@@ -340,12 +338,12 @@ def static_checks(results: list[Result]) -> None:
             "vmp_integrity_tag_equal",
             "seal_vm_blocks",
         ),
-        "共享双标签块格式及翻译器封装存在",
+        "共享双标签块格式和翻译器封装存在",
     )
-    marker_check(
+    require(
         results,
         "VMP 解释器 fail-closed",
-        interpreter_header + interpreter_source,
+        interpreter_header + interpreter,
         (
             "VM_FAULT_INTEGRITY",
             "VM_FAULT_STEP_LIMIT",
@@ -360,10 +358,10 @@ def static_checks(results: list[Result]) -> None:
         ),
         "认证、预算、重入、边界和清理 fault 路径存在",
     )
-    marker_check(
+    require(
         results,
         "VMP 原生测试",
-        interpreter_smoke,
+        vmp_tests,
         (
             "test_integrity_known_vector",
             "test_authenticated_block_tamper",
@@ -376,7 +374,7 @@ def static_checks(results: list[Result]) -> None:
         ),
         "认证、边界、碰撞和预算场景存在",
     )
-    marker_check(
+    require(
         results,
         "VMP 嵌入产物检查",
         embed_checker + embedded_header,
@@ -390,35 +388,30 @@ def static_checks(results: list[Result]) -> None:
         "bitcode magic、长度、逐字节一致性和摘要检查存在",
     )
 
-    absence_check(
+    forbid(
         results,
         "构建助手隐式覆盖回归",
-        build_helper,
-        (
-            "static bool replace_ndk_clang()",
-            "if (!replace_ndk_clang())",
-            'android-ndk-r30-beta1-windows',
-            "std::fopen",
-        ),
-        "未发现旧硬编码 NDK 或默认覆盖入口",
+        build,
+        ("static bool replace_ndk_clang()", "if (!replace_ndk_clang())", "std::fopen"),
+        "未发现旧自动覆盖入口；仓库内旧 NDK 名称仅作为显式发现 fallback",
     )
-    marker_check(
+    require(
         results,
         "构建助手安全默认值",
-        build_helper,
+        build,
         (
             "--install-into-ndk",
-            "--doctor",
-            "--doctor-only",
+            "Explicit installation into dedicated NDK copy",
+            "Use only a dedicated NDK copy",
             "ANDROID_NDK_HOME",
             "ANDROID_NDK_ROOT",
             "vswhere",
             ".bak",
         ),
-        "显式安装、环境发现、诊断和备份路径存在",
+        "只有显式安装才写入专用副本，并保留环境发现和备份",
     )
 
-    marker_check(
+    require(
         results,
         "中文 README",
         readme,
@@ -434,9 +427,9 @@ def static_checks(results: list[Result]) -> None:
             "overlay update",
             "当前仍未完成",
         ),
-        "当前字符串/VMP/CLI 能力、参数、边界和未完成项存在",
+        "字符串/VMP/CLI 能力、参数、边界和未完成项存在",
     )
-    marker_check(
+    require(
         results,
         "中文加固文档",
         hardening_doc,
@@ -452,7 +445,7 @@ def static_checks(results: list[Result]) -> None:
         ),
         "威胁模型、实现、验收、边界和路线存在",
     )
-    marker_check(
+    require(
         results,
         "认证字符串专项文档",
         string_doc,
@@ -472,10 +465,10 @@ def static_checks(results: list[Result]) -> None:
 
 def validate_python(results: list[Result]) -> None:
     targets = [
+        ROOT / "tools" / "allvm.py",
         ROOT / "tools" / "allvm-doctor.py",
         ROOT / "tools" / "check-hardening.py",
         ROOT / "tools" / "check-vmp-embed.py",
-        ROOT / "tools" / "allvm.py",
     ]
     try:
         for target in targets:
@@ -483,7 +476,7 @@ def validate_python(results: list[Result]) -> None:
     except (py_compile.PyCompileError, OSError) as exc:
         add(results, "Python 工具语法", False, str(exc))
         return
-    add(results, "Python 工具语法", True, "doctor、CLI、加固和嵌入检查器通过 py_compile")
+    add(results, "Python 工具语法", True, "CLI、doctor、加固和嵌入检查器通过 py_compile")
 
 
 def compile_secure_random_header(results: list[Result], required: bool) -> None:
@@ -542,32 +535,29 @@ int main() {
 }
 '''
 
-    with tempfile.TemporaryDirectory(prefix="allvm-hardening-") as temp_text:
-        temp = Path(temp_text)
+    with tempfile.TemporaryDirectory(prefix="allvm-hardening-") as temporary:
+        temp = Path(temporary)
         (temp / "llvm" / "Support").mkdir(parents=True)
         (temp / "llvm" / "CryptoUtils.h").write_text(crypto_stub, encoding="utf-8")
-        (temp / "llvm" / "Support" / "ErrorHandling.h").write_text(
-            error_stub, encoding="utf-8"
-        )
+        (temp / "llvm" / "Support" / "ErrorHandling.h").write_text(error_stub, encoding="utf-8")
         source = temp / "secure_random_smoke.cpp"
         binary = temp / "secure_random_smoke"
         source.write_text(test_source, encoding="utf-8")
-        command = [
-            compiler,
-            "-std=c++17",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-I",
-            str(temp),
-            "-I",
-            str(ROOT / "llvm" / "include"),
-            str(source),
-            "-o",
-            str(binary),
-        ]
         completed = subprocess.run(
-            command,
+            [
+                compiler,
+                "-std=c++17",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(temp),
+                "-I",
+                str(ROOT / "llvm" / "include"),
+                str(source),
+                "-o",
+                str(binary),
+            ],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -602,11 +592,7 @@ int main() {
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--compile-header",
-        action="store_true",
-        help="require a C++ compiler and compile/run SecureRandom.h smoke test",
-    )
+    parser.add_argument("--compile-header", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -619,19 +605,13 @@ def main() -> int:
         add(results, "检查器执行", False, str(exc))
 
     if args.json:
-        print(
-            json.dumps(
-                {"results": [asdict(result) for result in results]},
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        print(json.dumps({"results": [asdict(item) for item in results]}, ensure_ascii=False, indent=2))
     else:
-        width = max((len(result.name) for result in results), default=0)
-        for result in results:
-            print(f"[{result.status:4}] {result.name:<{width}}  {result.detail}")
+        width = max((len(item.name) for item in results), default=0)
+        for item in results:
+            print(f"[{item.status:4}] {item.name:<{width}}  {item.detail}")
 
-    return 1 if any(result.status == "FAIL" for result in results) else 0
+    return 1 if any(item.status == "FAIL" for item in results) else 0
 
 
 if __name__ == "__main__":

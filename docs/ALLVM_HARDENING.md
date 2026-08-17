@@ -1,231 +1,245 @@
-# ALLVM 加固说明
+# ALLVM 加固设计与验收说明
 
-本文记录 `hardening/p0-secure-seeding-doctor` 分支已经完成的安全改造、验证范围、剩余风险和后续实施顺序。目标是把大规模重构拆成可独立审查、可回归的小步骤。
+本文记录从原始 ALLVM 到当前 `security/p3-authenticated-strings` 分支已经完成的安全改造、验证范围、剩余边界和后续实施顺序。
+
+相关文档：
+
+- 总览与使用：[`../README.md`](../README.md)
+- CLI 与项目接入：[`ALLVM_USAGE_CN.md`](ALLVM_USAGE_CN.md)
+- 认证字符串细节：[`AUTHENTICATED_STRINGS_CN.md`](AUTHENTICATED_STRINGS_CN.md)
 
 ## 1. 威胁模型
 
-本阶段主要对抗：
+### 1.1 重点提高成本的攻击
 
-- 通过构建时间推测 PRNG 种子；
-- 不同 Pass 或不同函数复用相同随机序列；
-- 从编译日志中直接取得显式种子；
-- 利用错误的十六进制种子解析触发越界写入；
-- 通过固定随机序列批量匹配常量保护和 VMP 产物；
-- 因 NDK、工具链或 ELF 页对齐配置错误造成构建和运行失败。
+- 静态提取字符串、常量、控制流和调用关系；
+- 批量模式匹配旧 XOR/加减字符串解密器；
+- 修改 VMP 字节码或字符串密文后继续运行；
+- 复制受保护记录到不同位置；
+- 利用弱随机种子复现多个构建；
+- 通过未支持 IR 让 VMP 静默生成错误语义；
+- 利用固定 VM/code/data 容量、错误跳转或 switch 表导致越界；
+- 通过 NDK 被直接覆盖造成环境污染和不可恢复构建；
+- 项目配置与生成参数漂移。
 
-本阶段不宣称解决：
+### 1.2 不声称完全解决
 
-- 客户端长期密钥不可提取；
-- 字符串记录的标准 AEAD，以及客户端认证密钥不可提取；
-- 运行时内存中的明文绝对不可观察；
-- 对所有 LLVM IR 构造、ABI 和 Android ROM 的兼容；
-- 自定义 ELF 装载器的全部边界检查和 16 KiB 页适配。
+- 具备 root、内核、调试器或完整动态插桩能力的攻击者；
+- 能够提取客户端所有 key share 并复刻认证算法的攻击者；
+- 服务端授权逻辑缺失；
+- 长期私钥放在客户端；
+- Android 平台本身被完全控制；
+- 未经真实 NDK/设备验证的 ABI、页面大小和性能问题。
 
-## 2. 构建级安全随机根
+## 2. 构建级随机根
 
-新增：
+### 2.1 系统随机源
 
 ```text
-llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
+Windows → BCryptGenRandom
+POSIX   → /dev/urandom（短读和 EINTR 处理）
 ```
 
-默认随机源：
-
-- Windows：`BCryptGenRandom` 与 `BCRYPT_USE_SYSTEM_PREFERRED_RNG`；
-- POSIX：`/dev/urandom`，处理短读和 `EINTR`；
-- 无法获得系统熵时立即终止，不再回退到时间、地址或弱 PRNG。
-
-每个编译进程只生成一次 32 字节构建根。随后使用 SHA-256 将根种子和域字符串组合，派生现有 `CryptoUtils` 所需的 128 位 AES-CTR 种子：
+无法获取系统熵时直接终止，不回退到：
 
 ```text
-BuildSeed（32 字节）
+time
+地址
+rand/srand
+std::mt19937(time)
+```
+
+### 2.2 可复现构建
+
+仅显式设置 `ALLVM_BUILD_SEED` 时启用。格式为 64 个十六进制字符，可带 `0x` 前缀。
+
+默认发布构建不设置该变量。
+
+### 2.3 域分离
+
+```text
+BuildSeed
 ├── constant-int
 ├── constant-fp
-├── string-encryption | ModuleIdentifier
-├── legacy-vmp-layout | ModuleIdentifier | FunctionName
-└── legacy-vmp-integrity | ModuleIdentifier | FunctionName
+├── string-record-layout | module
+├── string-record-key    | module | global | id | flags | plaintext fingerprint
+├── string-record-mask   | module | global | id | flags | plaintext fingerprint
+├── legacy-vmp-layout    | module | function
+└── legacy-vmp-integrity | module | function
 ```
 
-这样可以避免整数常量、浮点常量和不同 VMP 函数之间意外复用随机序列。
+用途之间不直接复用随机流。
 
-### 可复现构建
+### 2.4 CryptoUtils 修复
 
-设置 `ALLVM_BUILD_SEED` 可以显式进入确定性模式：
+- 严格检查显式种子长度和十六进制字符；
+- 修复 `0x` 前缀处理可能越界；
+- 不打印原始种子；
+- 清理 AES key、schedule、CTR、随机池和临时缓冲；
+- 修复 `get_bytes()` 结束条件；
+- `get_range()` 使用无偏拒绝采样；
+- 避免 32 位平台移位未定义行为。
 
-```bash
-export ALLVM_BUILD_SEED=9f3d0f0f2a37d64e7adbb5bf402f8de02ecdf73334edb81beeaaf9d6f2aaf02c
-```
+## 3. 认证字符串记录
 
-规则：
+### 3.1 旧实现问题
 
-- 必须是 64 个十六进制字符；
-- 可选 `0x` 或 `0X` 前缀；
-- 不接受普通密码或任意长度文本；
-- 发布构建建议不设置；
-- 变量只保证 ALLVM 随机域可重复，不保证完整二进制逐字节一致。
+旧字符串格式依赖 XOR、取反、加减和前一明文字节反馈，密钥、垃圾和密文位于同一表中。攻击者识别记录布局和解密器后即可批量还原，且记录被修改时没有可靠完整性验证。
 
-## 3. CryptoUtils 修复
+旧实现已从 `LLVMObfuscation` 正式构建中移除；`StringEncryption.cpp` 现在是认证记录实现。
 
-### 3.1 默认种子
-
-旧实现的问题：
-
-- Windows 使用当前时间播种 `std::mt19937`；
-- 只有 16 字节 AES 密钥外形，并不代表输入熵达到 128 位；
-- POSIX 使用独立文件流逻辑，错误处理和 Windows 不一致。
-
-现在所有主机统一调用 `fillSecureRandom()`，从操作系统 CSPRNG 取得 16 字节材料，再初始化现有 AES-CTR 池。
-
-### 3.2 显式十六进制种子
-
-旧实现接受 34 字符形式时从索引 2 开始读取，却使用 `i >> 1` 作为目标索引。最后一个字节会写到 `s[16]`，超出 16 字节数组。
-
-现在：
-
-1. 先验证 `0x` 前缀；
-2. 去除前缀后要求长度严格为 32；
-3. 对每个字符执行显式十六进制校验；
-4. 使用独立目标索引解码 16 字节；
-5. 不在调试日志中输出种子；
-6. 使用后清理临时解码缓冲。
-
-### 3.3 敏感数据清理
-
-析构时使用 volatile 写循环清理：
-
-- AES 密钥；
-- key schedule；
-- CTR；
-- 随机池；
-- 内部种子字符串存储。
-
-这比普通 `memset` 更不容易被优化器视为无用写入而移除。
-
-### 3.4 无偏范围随机
-
-旧 `get_range()` 通过计算位掩码进行拒绝采样。当 `log == 32` 且主机的 `unsigned long` 为 32 位时，`1UL << 32` 存在未定义行为。
-
-现在使用拒绝阈值：
-
-```cpp
-const uint32_t Threshold = static_cast<uint32_t>(-max) % max;
-```
-
-先拒绝低于阈值的 32 位值，再执行 `% max`，避免移位未定义行为并保持 `[0, max)` 上的均匀分布。
-
-## 4. 常量保护 Pass 修复
-
-整数和浮点 Pass 已完成：
-
-- 分别使用 `constant-int` 与 `constant-fp` 域；
-- 判断当前函数的 `FuncModifyIRs`，不再错误检查整个全局 map；
-- 对 PHI 节点统一使用 incoming-value API；
-- 保留 switch 前驱的跳过行为；
-- 显式包含 `unordered_map`，减少间接 include 依赖。
-
-### 字符串 Pass 随机生命周期
-
-`StringEncryption.cpp` 现在按 `string-encryption | ModuleIdentifier` 派生独立随机序列，因此显式 `ALLVM_BUILD_SEED` 模式可以复现字符串保护，而不同模块不会意外共享同一序列。
-
-同时完成：
-
-- 使用 `CryptoUtils::get_range()` 无偏选择 8/16 位密钥和垃圾区长度，包含配置的最大值；
-- 以 `std::vector<uint8_t>` 代替裸 `new[]` 临时随机缓冲；
-- 使用后清理临时随机缓冲；
-- Pass finalization 时清理编译进程内的字符串数据和密钥向量。
-
-这些改动改善的是构建随机性、可复现性和编译期敏感数据生命周期。现有字符串记录仍使用自定义可逆变换，密钥与密文共同存放在二进制中，也没有认证标签，因此不能称为 AEAD；标准认证加密仍是后续独立改造。
-
-## 5. 旧版 VMP 随机化与兼容性预检
-
-### 5.1 函数级随机域
-
-旧版 `aVMP.cpp` 原先使用：
-
-```cpp
-srand(time(0));
-xorshift32_seed ^= rand();
-```
-
-同一秒内的构建容易产生相关种子，也难以在不同函数之间建立稳定隔离。现在每个翻译器按以下域派生独立 `CryptoUtils`：
+### 3.2 当前密码结构
 
 ```text
-legacy-vmp-layout | ModuleIdentifier | FunctionName
-legacy-vmp-integrity | ModuleIdentifier | FunctionName
+ChaCha20（20 轮，counter=1）
++
+SipHash-2-4 tag 0（独立 128 位密钥）
++
+SipHash-2-4 tag 1（另一独立 128 位密钥）
 ```
 
-随后取得非零 32 位种子，保证 xorshift 状态不会以零启动。布局随机流与认证密钥使用不同域。xorshift 仍是可逆混淆，不是 AEAD；完整性由后述分块标签单独负责。
+两个标签和不同 domain 合计提供 128 位记录标签。采用 Encrypt-then-MAC：先验证，后解密。
 
-### 5.2 VMP 兼容性预检
-
-新增：
+记录头 48 字节：
 
 ```text
-llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
-llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+magic/version/flags
+record_id
+plaintext_size
+12-byte nonce
+record_offset
+64-bit tag0
+64-bit tag1
+ciphertext
 ```
 
-`analyzeVMPFunction()` 在创建 helper、导入解释器或改写目标函数前执行，不修改 IR。分析结果包含：
+认证覆盖头部 0..31 和密文，因此记录 ID、类型、长度、nonce、位置和正文均被绑定。
 
-- 是否支持；
-- 基本块和指令数量；
-- ConstantExpr 数量；
-- 估算代码和数据字节数；
-- 最多 16 条去重后的拒绝原因。
+### 3.3 密钥派生和 nonce 复用防护
 
-当前嵌入解释器以 64 位 `uintptr_t` 为 ABI，因此预检只放行 64 位目标。其核心子集包括：至多 64 位整数、普通地址空间指针、`float/double`、简单内存操作、受支持算术、无符号比较、简单 GEP、普通 C 调用、分支、switch 和返回。32 位目标会明确拒绝，而不是依赖截断行为。
-
-预检明确拒绝：
-
-- PHI、`select`、浮点比较、有符号比较；
-- 向量、聚合值、超过 64 位整数、`undef/poison`；
-- 动态/数组 alloca、atomic/volatile、`va_arg`；
-- exception personality、`invoke`、EH pad、`callbr`、`indirectbr`；
-- inline asm、`musttail`、operand bundle、非 C 调用约定；
-- byval/sret/inalloca/preallocated 参数；
-- 可变参数调用、直接递归；
-- 超出资源预算的函数。
-
-结构体 GEP 不再手工累加字段大小，而是使用 `DataLayout::getStructLayout()` 和 `getElementOffset()`，因此能够包含 ABI padding。
-
-### 5.3 资源阈值和严格模式
-
-`VMPResourceLimits` 默认值：
-
-| 资源 | 默认值 |
-|---|---:|
-| 基本块 | 4096 |
-| 指令 | 50000 |
-| 估算/实际代码 | 16 MiB |
-| 估算/实际数据 | 16 MiB |
-
-命令行对应：
+每条记录的 KDF 域绑定：
 
 ```text
--irobf-vmp-max-bbs
--irobf-vmp-max-instructions
--irobf-vmp-max-code-bytes
--irobf-vmp-max-data-bytes
--irobf-vmp-strict
+ModuleIdentifier
+GlobalName
+RecordID
+Flags
+PlaintextFingerprint128
 ```
 
-数值设为 0 可关闭该项阈值。默认模式会跳过并报告不兼容函数；严格模式通过 `report_fatal_error` 终止构建，适合 CI 和发布管线。
+因此即使测试中固定 `ALLVM_BUILD_SEED`，修改明文也会改变 key/nonce 派生域。
 
-翻译器还会检查实际 `vm_code`、数据偏移、32 位 IP 范围以及 branch/switch patch 边界。旧的固定 code/data 宏和 4096 基本块静默返回路径已经移除。
+指纹由两个固定独立 SipHash 值组成，用于 KDF 域分离，不作为记录认证标签。
 
-### 5.4 失败副作用和并发状态
+### 3.4 key share
 
-- 只有 translator 与嵌入解释器都成功后，才添加 `noinline/optnone` 并运行 modifier；
-- modifier 完成后调用 `verifyFunction()`，无效 IR 立即终止；
-- 每函数的 IP、数据区地址、数据区和 xorshift 状态使用 TLS，改善多线程并发隔离；
-- 直接递归提前拒绝，互递归和间接递归仍不能完全静态识别；
-- ConstantExpr 在翻译时会被物化为等价指令，极晚期失败时尚未实现完整 IR 事务回滚；
-- 旧版解释器没有独立操作数栈；数据值槽继续按实际结果动态创建；
-- 运行时限制 opcode 步数、Call opcode 次数和线程共享调用深度，并用每函数活动标志拒绝同函数重入。
+64 字节记录密钥被拆成两个 64 字节 XOR share。运行时按需 XOR 使用，不创建长期完整 key 全局。
 
-### 5.5 分块认证与执行预算
+这只增加提取步骤，不提供不可导出保证；两个 share 和验证器都在客户端。
 
-每个基本块格式由原来的 8 字节种子头升级为固定 32 字节认证头：
+### 3.5 Pass 执行顺序
+
+字符串 Pass 的 `runOnModule()` 不直接改写；实际工作位于 `doFinalization()`。
+
+自定义 ObfuscationPassManager 在所有 Module/Function Pass 运行后调用子 Pass finalization，因此：
+
+```text
+其他混淆完成
+→ 认证字符串改写
+→ 生成密码运行时
+→ module verifier
+```
+
+密码辅助函数不会再被平坦化、间接调用、常量保护或 VMP 处理。
+
+### 3.6 用户链预检
+
+允许：
+
+- 本地常量 `i8` 字节字符串；
+- 本地常量 `i16` UTF-16LE 数组；
+- 地址空间 0；
+- 通过本地常量容器和 ConstantExpr 到达函数指令；
+- 所有可达函数均启用 CSE。
+
+保守跳过或严格失败：
+
+- 外部可见全局；
+- DLL import/export；
+- TLS、COMDAT、自定义 section；
+- alias、ifunc 或其他不支持 GlobalValue；
+- 非零地址空间；
+- CSE enabled/disabled 混合用户；
+- 无函数指令用户；
+- 大端目标；
+- 单记录或总表超限。
+
+### 3.7 运行时生命周期
+
+优先级 0 的构造函数在普通 C++ 构造函数之前：
+
+```text
+逐条验证双标签
+→ 通过后 ChaCha20 解密
+→ 写入私有可写缓冲
+→ 任意失败 llvm.trap
+```
+
+原始明文 GlobalVariable 被删除，所有指令和本地全局初始化器重映射到明文缓冲。
+
+默认明文缓存到模块卸载。优先级 0 的 dtor 在普通 65535 析构之后 volatile 清零，避免普通析构先看到空字符串。
+
+### 3.8 参数
+
+```text
+-irobf-cse
+-irobf-cse-strict
+-irobf-cse-max-record-bytes=1048576
+-irobf-cse-max-table-bytes=67108864
+-irobf-cse-wipe-at-exit
+-irobf-cse-verify
+```
+
+### 3.9 安全边界
+
+- 不是标准 ChaCha20-Poly1305 API；
+- 客户端 key share 可提取；
+- 高权限攻击者理论上可修改后重新计算标签；
+- 默认明文生命周期是模块级，不是调用级；
+- 认证标签解决未授权篡改在执行前可检测，不等于远程信任根。
+
+## 4. 常量保护
+
+- 整数和浮点使用独立域；
+- 修复空工作集判断；
+- PHI incoming value 使用一致 API；
+- 临时随机材料清理；
+- 仍定位为 constant hiding，而非长期秘密加密。
+
+## 5. VMP
+
+### 5.1 IR 兼容性预检
+
+预检拒绝或限制：
+
+- PHI、select 和未实现 opcode；
+- 向量、聚合、超过 64 位整数；
+- undef/poison；
+- dynamic/array alloca；
+- atomic/volatile；
+- EH、invoke、callbr、indirectbr；
+- inline asm、musttail、operand bundle；
+- 特殊调用约定和 ABI 属性；
+- 可变参数调用；
+- 直接递归；
+- 资源超限；
+- 非 64 位目标。
+
+结构体 GEP 使用 `StructLayout` 的 ABI padding 偏移。
+
+### 5.2 分块认证
+
+每个基本块：
 
 ```text
 opcode_seed : u32
@@ -234,12 +248,22 @@ body_size   : u32
 magic       : u32
 tag0        : u64
 tag1        : u64
-ciphertext  : body_size bytes
+ciphertext  : body_size
 ```
 
-翻译器使用独立的 `legacy-vmp-integrity` 域派生 128 位函数密钥。两个域分离的 SipHash-2-4 标签覆盖版本、块偏移、正文长度、两个种子及加密正文。解释器先验证范围、magic 和两个标签，再设置流状态和 IP。branch/switch 目标必须指向完整块头，读取也不能跨过当前认证块。
+标签覆盖块位置、版本、长度、种子和加密正文。branch/switch 只能进入完整块头。
 
-新增运行时参数：
+### 5.3 编译期预算
+
+```text
+-irobf-vmp-max-bbs=4096
+-irobf-vmp-max-instructions=50000
+-irobf-vmp-max-code-bytes=16777216
+-irobf-vmp-max-data-bytes=16777216
+-irobf-vmp-strict
+```
+
+### 5.4 运行时预算
 
 ```text
 -irobf-vmp-max-runtime-steps=10000000
@@ -247,198 +271,132 @@ ciphertext  : body_size bytes
 -irobf-vmp-max-call-depth=64
 ```
 
-0 表示关闭对应限制。步数预算限制循环，调用预算限制单次解释中的 Call opcode，模块级 TLS 深度限制跨 VMP 函数嵌套；每函数 TLS 活动标志拒绝同函数重入。密钥位于客户端，所以标签不是不可伪造的远程信任根，也不提供 xorshift 之外的保密性。
+- opcode 步数限制循环；
+- Call opcode 次数限制单次调用；
+- 模块 TLS 记录跨 VMP 函数深度；
+- 每函数 TLS 标志拒绝同函数重入；
+- fault 后 fail-closed。
 
-### 5.6 运行时段边界与 fail-closed
+### 5.5 运行时边界
 
-解释器 ABI 新增三个每函数元数据：
-
-```text
-code_seg_size : i64，只读
-数据段大小 data_seg_size : i64，只读
-vm_fault      : i32，线程局部、保存首个故障
-```
-
-`aVMP.cpp` 从翻译器实际产生的 `vm_code.size()` 和 `curr_data_offset` 初始化长度，并把解释器 bitcode 中的 extern 声明映射到目标 Module 的对应全局变量。
-
-故障代码包括：
-
-```text
-VM_FAULT_CODE_RANGE
-VM_FAULT_DATA_RANGE
-VM_FAULT_NULL_ADDRESS
-VM_FAULT_INVALID_SIZE
-VM_FAULT_INVALID_OPCODE
-VM_FAULT_ARITHMETIC
-VM_FAULT_BAD_STATE
-VM_FAULT_INTEGRITY
-VM_FAULT_STEP_LIMIT
-VM_FAULT_CALL_LIMIT
-VM_FAULT_CALL_DEPTH
-VM_FAULT_REENTRANT
-VM_FAULT_BLOCK_RANGE
-```
-
-运行时规则：
-
-- 每次进入基本块先验证双标签，所有 code 字节读取同时受当前块和总 code 段边界约束；
-- VM 内部 data 读写统一使用 offset + size 边界检查；
-- data 段内的绝对地址自动转回受检 offset；
-- branch/switch 目标必须落在 code 段内；
-- switch 的 case 数必须小于等于剩余字节可容纳数量，防止篡改计数造成长循环；
-- opcode 解码设置尝试上限；
-- 除零、越界移位、非法宽度和无效 opcode 设置 fault；
-- opcode 步数、Call 次数、调用深度和重入超过预算时设置独立 fault；
-- 返回后保留返回值槽并清零其余 data 段；
-- 首个 fault 触发 `__builtin_trap()` fail-closed。
-
-辅助边界函数被强制内联。CI 会把 C 源编译为 Windows x64 bitcode，检查 `vm_interpreter` 不再调用未被克隆的内部 helper。
-
-该边界只能完整覆盖 VM 自有 code/data 段。非空外部原始指针没有可移植的对象长度元数据，因此只能做空地址检查，不能承诺防止所有调用方指针错误。
-
-### 5.7 嵌入产物与可执行测试
-
-仓库中的 `aVMPInterpreter/aVMPInterpreter.bc` 已由最新解释器 C 源重新生成，`llvm/include/llvm/Transforms/Obfuscation/vm.h` 由 bitcode 的原始字节生成。
-
-`tools/check-vmp-embed.py` 检查：
-
-- LLVM bitcode magic；
-- `binary_ir_length` 与文件长度；
-- `binary_ir_data` 与 `.bc` 逐字节一致；
-- include guard；
-- SHA-256 摘要。
-
-`tools/vmp-interpreter-bounds-smoke.c` 原生执行并验证：
-
-- 正常 VM data 读写；
-- code/data 越界；
-- 空地址和非法宽度；
-- 篡改的 switch case 数；
-- 非法 branch 目标；
-- 返回后临时 data 清理；
+- code/data 总段边界；
+- 当前认证块边界；
+- branch/switch 目标；
+- switch case 数量和表大小；
+- 除零和非法移位；
 - 解释器坏状态；
-- 固定 SipHash 向量、合法认证块、密文/标签/长度篡改和块内越界；
-- opcode 步数、Call 次数、调用深度和重入预算。
+- 返回后清理临时 data 段。
 
-`tools/vmp-compatibility-smoke.cpp` 使用 LLVM AsmParser 解析真实 IR，验证允许、拒绝和资源超限场景。CI 还会分别编译 `VMPCompatibility.cpp` 和集成后的 `aVMP.cpp`。
+## 6. 构建和环境隔离
 
-需要明确：双 SipHash 标签会在执行前检测块篡改，但密钥和验证器同驻客户端，不能提供服务端级不可伪造信任；xorshift 也仍不是 AEAD。
+### 6.1 Windows 构建助手
 
-## 6. 环境诊断
+- `--ndk`、`ALLVM_NDK`、`ANDROID_NDK_HOME/ROOT`；
+- Android SDK side-by-side NDK；
+- VS 2022 Enterprise/Professional/Community/Build Tools；
+- `vswhere` fallback；
+- `--doctor`、`--doctor-only`；
+- 默认不修改 NDK；
+- 只有显式 `--install-into-ndk` 才写入副本并建立 `.bak`。
 
-新增：
+### 6.2 overlay
 
-```text
-tools/allvm-doctor.py
-```
+`allvm overlay`：
 
-工具只依赖 Python 标准库，可检查：
+- 创建完整独立 NDK；
+- Linux 优先 reflink；
+- 不使用硬链接；
+- manifest 路径限制；
+- 源工具和安装工具 SHA-256；
+- status/update/verify/remove；
+- 恶意 `..`、绝对路径和符号链接逃逸拒绝。
 
-- Python、CMake、Ninja；
-- Java、ADB；
-- 显式 NDK 路径；
-- `ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT`；
-- Android SDK 下的 side-by-side NDK；
-- NDK 主机工具链和 `clang`、`clang++`、`ld.lld`；
-- 主机页大小；
-- Android ELF 的 LOAD 段对齐；
-- JSON 机器可读输出。
+### 6.3 项目配置
 
-示例：
+- `compat`、`balanced`、`strong`；
+- CMake、ndk-build、Gradle KTS/Groovy；
+- `allvm.json` 唯一手工源；
+- `allvm sync` 原子生成；
+- `allvm.lock.json` 记录配置和生成文件摘要；
+- `sync --check` 适合 CI。
 
-```bash
-python3 tools/allvm-doctor.py --ndk /path/to/android-ndk
-python3 tools/allvm-doctor.py --ndk /path/to/android-ndk --elf libexample.so
-python3 tools/allvm-doctor.py --json
-```
+## 7. 自动化验收
 
-诊断工具不会修改 NDK。
+### 7.1 安全随机
 
-## 7. 构建助手
+- 不同默认构建随机化；
+- 相同显式 seed 可复现；
+- 无时间/rand 回归；
+- Windows/POSIX CSPRNG 路径编译。
 
-`build.cpp` 已完成第一轮易用性和环境隔离改造：
+### 7.2 认证字符串
 
-- 支持 `--ndk <path>`；
-- 支持 `ALLVM_NDK`、`ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT`；
-- 可从 `ANDROID_SDK_ROOT`、`ANDROID_HOME` 和 Windows 默认 SDK 目录发现 side-by-side NDK；
-- 可识别 Visual Studio 2022 Enterprise、Professional、Community、Build Tools，并使用 `vswhere` 兜底；
-- 支持 `--doctor` 和 `--doctor-only`；
-- 默认把产物保留在 `build-windows\bin`，不会修改原 NDK；
-- 只有显式 `--install-into-ndk` 才执行复制，并为原文件创建 `.bak`；
-- 对目标 triple 和并行任务数进行输入校验。
+- RFC 8439 ChaCha block 向量；
+- 固定双标签；
+- split-key round trip；
+- UTF-16LE；
+- 头字段绑定；
+- 篡改拒绝和输出清零；
+- Windows MSVC `/W4 /WX`；
+- 生成 LLVM runtime 并用 `lli` 执行；
+- 完整 Pass 删除明文 GlobalVariable；
+- constructor 解密后 main 正常；
+- dtor wipe 存在；
+- module verifier。
 
-当前仍是 Windows 专用构建助手，且显式安装模式本质上仍会复制文件。长期方案是独立 toolchain overlay，并通过 CMake、Gradle 或 ndk-build 显式选择编译器。
+### 7.3 VMP
 
-## 8. 当前自动化验证
+- 支持/拒绝 IR 行为测试；
+- 分块标签固定向量；
+- 密文/标签/长度篡改；
+- 块内和段边界；
+- opcode 碰撞；
+- 步数/调用/深度/重入；
+- 嵌入 bitcode 与 `vm.h` 逐字节一致；
+- `aVMP.cpp` 语法和运行时 smoke。
 
-`.github/workflows/hardening-smoke.yml` 用于：
+### 7.4 易用性
 
-- 编译检查 `tools/allvm-doctor.py`、`tools/check-hardening.py` 和 `tools/check-vmp-embed.py`；
-- 验证 doctor 的 `--help` 入口；
-- 编译并运行 `SecureRandom.h` 的最小 C++17 烟雾测试；
-- 使用同一套 LLVM 头文件分别编译 `VMPCompatibility.cpp` 和 `aVMP.cpp`；
-- 构建并运行解析真实 IR 的 VMP 兼容性行为测试；
-- 原生编译并执行 VMP 解释器 code/data/fault 边界测试；
-- 临时生成 Windows x64 bitcode，检查 helper 内联、fault/size 全局和 `llvm.trap`；
-- 检查仓库 `.bc` 与 `vm.h` 逐字节一致；
-- 检查安全随机头文件包含 Windows 与 POSIX 路径；
-- 阻止常量保护、`CryptoUtils` 和旧版 VMP 重新引入弱随机调用；
-- 检查构建助手保持“默认不修改 NDK”；
-- 在 Windows runner 上使用 MSVC 编译 `build.cpp`；
-- 检查中文 README 中的确定性种子、安全默认值和安全边界说明。
+- Python 3.9/3.13；
+- Windows/Linux；
+- CMake/ndk-build/Gradle 渲染；
+- project lock；
+- stale 检测；
+- overlay 创建/更新/篡改/安全删除；
+- manifest 路径逃逸。
 
-这些是烟雾测试，不等价于完整 LLVM 构建。
+## 8. 仍需真实环境验证
 
-## 9. 验收标准
+- 完整 LLVM 21 Windows 全量构建；
+- NDK r27/r29/后续版本矩阵；
+- arm64-v8a、x86_64；
+- Android 4 KiB/16 KiB 真机；
+- exceptions/RTTI、LTO/ThinLTO；
+- 全局构造/析构复杂项目；
+- 字符串表启动时间和内存增量；
+- VMP 长循环、深递归和多线程；
+- 自定义 ELF 装载器 W^X 和 16 KiB。
 
-### 随机性
+## 9. 后续优先级
 
-- 不设置 `ALLVM_BUILD_SEED` 时，两次构建应产生不同保护布局；
-- 设置相同种子时，同一模块和函数的随机域应可重复；
-- 不同函数不得共享同一 VMP 初始序列；
-- 源码和日志不得出现时间播种路径或原始种子值。
+### P0
 
-### 正确性
+1. 在真实 Android app 中验证认证字符串 ctor/dtor；
+2. 完整 LLVM 21 Windows 构建；
+3. arm64/x86_64、4 KiB/16 KiB 设备矩阵；
+4. 自定义 ELF 装载器的页大小、溢出和 W^X。
 
-- 32 字符和带 `0x` 的 34 字符种子都必须正确解码；
-- 非十六进制、过短和过长种子必须明确失败；
-- `get_range(0)` 返回 0；
-- 对常见和极端 `max` 值进行分布与边界测试；
-- PHI、switch 前驱和空函数保持语义一致。
+### P1
 
-### 兼容性
-
-至少覆盖：
-
-- Windows 与 Linux 主机构建；
-- `arm64-v8a`、`x86_64`；
-- 4 KiB 与 16 KiB 页；
-- RTTI/exceptions 开关组合；
-- `-O0`、`-O2`、`-Oz`、LTO/ThinLTO；
-- 递归、并发、JNI、函数指针与虚函数。
-
-## 10. 仍需完成的高优先级改造
-
-### P0/P1
-
-1. 字符串记录改为标准 AEAD，并定义缓存、TLS 和调用期明文生命周期；
-2. 扩展 capability analysis 覆盖面、互递归静态检测和机器可读跳过报告；
-3. 为分块认证增加可选设备/服务端派生因子，降低纯离线重签名能力；
-4. 增加真实 Android 递归、并发和长循环的预算回归矩阵；
-5. 清理符号、日志、统计数据中的密钥和内部状态；
-6. 修复自定义 ELF 装载器的 16 KiB 页、边界溢出和 W^X；
-7. 在现有显式 NDK 和安全默认值基础上实现完整 toolchain overlay，移除向 NDK 复制工具的兼容模式。
+1. 字符串 `cache/tls/call` 生命周期；
+2. 标准 ChaCha20-Poly1305 或平台密码后端；
+3. Keystore/设备/服务端派生因子；
+4. 机器可读保护和跳过报告；
+5. 性能与体积预算。
 
 ### P2
 
-1. 迁移 New Pass Manager；
-2. 将大部分保护拆为 out-of-tree 插件；
-3. 建立 LLVM/NDK/ABI 构建矩阵；
-4. 添加体积、编译时间、启动时间和热点开销预算；
-5. 增加产物密钥特征扫描和差分测试。
-
-## 11. 安全结论
-
-当前改造显著提升了构建时随机源、种子隔离和错误处理质量，并修复了一个真实的显式种子越界问题。但保护逻辑和解密逻辑仍同时存在于客户端，攻击者在足够权限和时间下仍可观察运行时状态。
-
-因此，ALLVM 应被视为分层防护中的客户端成本提升手段，而不是服务端信任、硬件密钥和完整授权协议的替代品。
+1. New Pass Manager/out-of-tree 插件化；
+2. Gradle 约定插件；
+3. GUI 复用 CLI；
+4. 多 LLVM/NDK overlay 生命周期。

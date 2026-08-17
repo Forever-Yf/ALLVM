@@ -1,0 +1,135 @@
+name: Authenticated string security checks
+
+on:
+  pull_request:
+    paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
+      - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "llvm/lib/Transforms/Obfuscation/ObfuscationPassManager.cpp"
+      - "llvm/lib/Transforms/Obfuscation/IndirectCall.cpp"
+      - "tools/string-*-smoke.cpp"
+      - "tools/check-hardening.py"
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
+      - ".github/workflows/string-security-smoke.yml"
+  push:
+    branches:
+      - "security/**"
+    paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
+      - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "llvm/lib/Transforms/Obfuscation/ObfuscationPassManager.cpp"
+      - "llvm/lib/Transforms/Obfuscation/IndirectCall.cpp"
+      - "tools/string-*-smoke.cpp"
+      - "tools/check-hardening.py"
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
+      - ".github/workflows/string-security-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authenticated-string-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-runtime:
+    name: Linux primitives and generated LLVM runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h
+            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringIR.h
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp
+            tools/string-crypto-smoke.cpp
+            tools/string-runtime-ir-smoke.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Locate the newest installed LLVM toolchain
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then
+            LLVM_CONFIG="$(command -v llvm-config || true)"
+          fi
+          if [ -z "$LLVM_CONFIG" ]; then
+            echo "No installed llvm-config was found" >&2
+            exit 1
+          fi
+          echo "LLVM_CONFIG=$LLVM_CONFIG" >> "$GITHUB_ENV"
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Build and run authenticated record vectors
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          "$CXX" \
+            -Illvm/include \
+            -std=c++17 \
+            -Wall -Wextra -Werror \
+            tools/string-crypto-smoke.cpp \
+            -o /tmp/string-crypto-smoke
+          /tmp/string-crypto-smoke
+
+      - name: Build and execute generated LLVM runtime
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          LLI="$LLVM_BINDIR/lli"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          if [ ! -x "$LLI" ]; then LLI="$(command -v lli)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core bitwriter support)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+          "$CXX" \
+            -Illvm/include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra -Werror \
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp \
+            tools/string-runtime-ir-smoke.cpp \
+            "${LLVM_LDFLAGS[@]}" \
+            "${LLVM_LIBS[@]}" \
+            "${LLVM_SYSTEM_LIBS[@]}" \
+            -o /tmp/string-runtime-ir-smoke
+          /tmp/string-runtime-ir-smoke /tmp/string-runtime.bc
+          "$LLI" /tmp/string-runtime.bc
+          "$LLVM_DIS" /tmp/string-runtime.bc -o /tmp/string-runtime.ll
+          grep -q '@__allvm_string_open_v1' /tmp/string-runtime.ll
+          grep -q '@__allvm_str_chacha_block_v1' /tmp/string-runtime.ll
+          grep -q '@__allvm_str_tag_v1' /tmp/string-runtime.ll
+          grep -q 'llvm.memset' /tmp/string-runtime.ll
+
+  windows-primitives:
+    name: Windows authenticated record vectors
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h
+            tools/string-crypto-smoke.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Compile and run with MSVC strict warnings
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VS_INSTALL=%%i
+          if not defined VS_INSTALL exit /b 1
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /Illvm\include tools\string-crypto-smoke.cpp /Fe:string-crypto-smoke.exe
+          string-crypto-smoke.exe

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "name": "balanced",
+  "title": "平衡配置",
+  "description": "用于授权、协议和业务规则模块。在兼容配置上增加间接全局变量、控制流平坦化和间接分支。",
+  "compile_options": [
+    "-mllvm", "-irobf",
+    "-mllvm", "-irobf-cse",
+    "-mllvm", "-irobf-cie",
+    "-mllvm", "-level-cie=2",
+    "-mllvm", "-irobf-cfe",
+    "-mllvm", "-level-cfe=2",
+    "-mllvm", "-irobf-indgv",
+    "-mllvm", "-level-indgv=2",
+    "-mllvm", "-irobf-icall",
+    "-mllvm", "-level-icall=2",
+    "-mllvm", "-irobf-fla",
+    "-mllvm", "-irobf-indbr",
+    "-mllvm", "-level-indbr=2"
+  ],
+  "cxx_options": [],
+  "link_options": [],
+  "notes": [
+    "建议用于经过单元测试和性能基线覆盖的核心模块。",
+    "不默认启用 VMP、Syscall Protect 或反调试检测。"
+  ]
+}

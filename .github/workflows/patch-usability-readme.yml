@@ -1,0 +1,41 @@
+name: Apply Chinese README CLI update
+
+on:
+  push:
+    branches:
+      - usability/p1-cli-presets-overlay
+    paths:
+      - .github/workflows/patch-usability-readme.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            README.md
+            tools/apply-usability-readme.py
+          sparse-checkout-cone-mode: false
+
+      - name: Apply and validate README update
+        run: |
+          python3 -m py_compile tools/apply-usability-readme.py
+          python3 tools/apply-usability-readme.py
+          grep -q '^## 统一 CLI 快速入口$' README.md
+          grep -q 'allvm.py overlay create' README.md
+          grep -q 'docs/ALLVM_USAGE_CN.md' README.md
+          grep -q '^## 预设与构建系统生成$' README.md
+          ! grep -q '完整的独立 toolchain overlay 仍在后续路线中' README.md
+
+      - name: Commit README
+        run: |
+          git add README.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "document unified CLI and isolated NDK workflow"
+          git push origin HEAD:usability/p1-cli-presets-overlay

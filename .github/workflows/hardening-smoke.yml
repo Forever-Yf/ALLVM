@@ -5,49 +5,62 @@ on:
     paths:
       - "README.md"
       - "docs/ALLVM_HARDENING.md"
+      - "docs/AUTHENTICATED_STRINGS_CN.md"
       - "build.cpp"
+      - "configs/profiles/strong.json"
       - "aVMPInterpreter/aVMPInterpreter.c"
       - "aVMPInterpreter/aVMPInterpreter.h"
       - "aVMPInterpreter/VMPIntegrity.h"
       - "aVMPInterpreter/aVMPInterpreter.bc"
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
       - "llvm/include/llvm/Transforms/Obfuscation/vm.h"
+      - "llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp"
       - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/allvm.py"
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
       - "tools/check-vmp-embed.py"
+      - "tools/string-*-smoke.cpp"
       - "tools/vmp-compatibility-smoke.cpp"
       - "tools/vmp-interpreter-bounds-smoke.c"
       - ".github/workflows/hardening-smoke.yml"
   push:
     branches:
       - "hardening/**"
+      - "security/**"
     paths:
       - "README.md"
       - "docs/ALLVM_HARDENING.md"
+      - "docs/AUTHENTICATED_STRINGS_CN.md"
       - "build.cpp"
+      - "configs/profiles/strong.json"
       - "aVMPInterpreter/aVMPInterpreter.c"
       - "aVMPInterpreter/aVMPInterpreter.h"
       - "aVMPInterpreter/VMPIntegrity.h"
       - "aVMPInterpreter/aVMPInterpreter.bc"
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
       - "llvm/include/llvm/Transforms/Obfuscation/vm.h"
+      - "llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp"
       - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/allvm.py"
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
       - "tools/check-vmp-embed.py"
+      - "tools/string-*-smoke.cpp"
       - "tools/vmp-compatibility-smoke.cpp"
       - "tools/vmp-interpreter-bounds-smoke.c"
       - ".github/workflows/hardening-smoke.yml"
@@ -61,8 +74,9 @@ concurrency:
 
 jobs:
   linux-hardening:
-    name: Linux hardening checks
+    name: Linux aggregate hardening checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out required hardening files
         uses: actions/checkout@v4
@@ -70,30 +84,38 @@ jobs:
           sparse-checkout: |
             README.md
             docs/ALLVM_HARDENING.md
+            docs/AUTHENTICATED_STRINGS_CN.md
             build.cpp
+            configs/profiles/strong.json
             aVMPInterpreter/aVMPInterpreter.c
             aVMPInterpreter/aVMPInterpreter.h
             aVMPInterpreter/VMPIntegrity.h
             aVMPInterpreter/aVMPInterpreter.bc
-            llvm/include/llvm/Transforms/Obfuscation/vm.h
-            tools/allvm-doctor.py
-            tools/check-hardening.py
-            tools/check-vmp-embed.py
-            tools/vmp-compatibility-smoke.cpp
-            tools/vmp-interpreter-bounds-smoke.c
-            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
-            llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
+            llvm/include/llvm/CryptoUtils.h
+            llvm/include/llvm/Transforms/Obfuscation
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp
             llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
             llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp
             llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
             llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
+            llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+            tools/allvm.py
+            tools/allvm-doctor.py
+            tools/check-hardening.py
+            tools/check-vmp-embed.py
+            tools/string-crypto-smoke.cpp
+            tools/string-runtime-ir-smoke.cpp
+            tools/string-pass-smoke.cpp
+            tools/vmp-compatibility-smoke.cpp
+            tools/vmp-interpreter-bounds-smoke.c
           sparse-checkout-cone-mode: false
 
       - name: Validate Python entrypoints and embedded bitcode
         run: |
           python3 -m py_compile \
+            tools/allvm.py \
             tools/allvm-doctor.py \
             tools/check-hardening.py \
             tools/check-vmp-embed.py
@@ -112,6 +134,7 @@ jobs:
   vmp-syntax:
     name: VMP LLVM and runtime checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out ALLVM custom headers and VMP sources
         uses: actions/checkout@v4
@@ -277,6 +300,7 @@ jobs:
   windows-build-helper:
     name: Windows build helper compile
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - name: Check out build helper
         uses: actions/checkout@v4

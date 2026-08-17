@@ -1,0 +1,40 @@
+name: Check VMP patch parts
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/check-vmp-patch-parts.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/patches
+          sparse-checkout-cone-mode: false
+      - name: Show part sizes and hashes
+        shell: bash
+        run: |
+          wc -c .github/patches/vmp-integrity-*.b64
+          sha256sum .github/patches/vmp-integrity-*.b64
+          cat .github/patches/vmp-integrity-*.b64 > /tmp/patch.b64
+          wc -c /tmp/patch.b64
+          sha256sum /tmp/patch.b64
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+          data = Path('/tmp/patch.b64').read_bytes()
+          print('length', len(data), 'mod4', len(data) % 4)
+          try:
+              raw = gzip.decompress(base64.b64decode(data, validate=True))
+          except Exception as exc:
+              print(type(exc).__name__, exc)
+              raise
+          print('decoded', len(raw), hashlib.sha256(raw).hexdigest())
+          PY

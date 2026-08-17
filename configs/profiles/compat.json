@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "name": "compat",
+  "title": "兼容优先",
+  "description": "用于首次接入和普通模块。启用字符串、常量和低强度间接调用保护，不启用控制流平坦化或 VMP。",
+  "compile_options": [
+    "-mllvm", "-irobf",
+    "-mllvm", "-irobf-cse",
+    "-mllvm", "-irobf-cie",
+    "-mllvm", "-level-cie=1",
+    "-mllvm", "-irobf-cfe",
+    "-mllvm", "-level-cfe=1",
+    "-mllvm", "-irobf-icall",
+    "-mllvm", "-level-icall=1"
+  ],
+  "cxx_options": [],
+  "link_options": [],
+  "notes": [
+    "适合作为新项目的默认起点。",
+    "仍需对异常、RTTI、LTO 和目标 ABI 做回归测试。"
+  ]
+}

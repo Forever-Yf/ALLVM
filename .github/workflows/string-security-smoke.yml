@@ -70,13 +70,22 @@ jobs:
           echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
           "$LLVM_CONFIG" --version
 
+      - name: Build an ALLVM-only header overlay
+        shell: bash
+        run: |
+          mkdir -p /tmp/allvm-include/llvm/Transforms /tmp/allvm-include/llvm
+          cp -R llvm/include/llvm/Transforms/Obfuscation \
+            /tmp/allvm-include/llvm/Transforms/
+          cp llvm/include/llvm/CryptoUtils.h \
+            /tmp/allvm-include/llvm/CryptoUtils.h
+
       - name: Build and run authenticated record vectors
         shell: bash
         run: |
           CXX="$LLVM_BINDIR/clang++"
           if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
           "$CXX" \
-            -Illvm/include \
+            -I/tmp/allvm-include \
             -std=c++17 \
             -Wall -Wextra -Werror \
             tools/string-crypto-smoke.cpp \
@@ -97,7 +106,7 @@ jobs:
           read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core bitwriter support)"
           read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
           "$CXX" \
-            -Illvm/include \
+            -I/tmp/allvm-include \
             "${LLVM_CXXFLAGS[@]}" \
             -std=c++17 \
             -Wall -Wextra -Werror -Wno-unused-parameter \
@@ -122,7 +131,7 @@ jobs:
           if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
           read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
           "$CXX" \
-            -Illvm/include \
+            -I/tmp/allvm-include \
             "${LLVM_CXXFLAGS[@]}" \
             -std=c++17 \
             -Wall -Wextra -Werror \

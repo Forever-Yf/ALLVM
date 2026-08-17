@@ -4,6 +4,12 @@
 
 #define IS_INLINE_FUNC
 
+#ifdef IS_INLINE_FUNC
+#define VM_FORCE_INLINE static __inline__ __attribute__((always_inline))
+#else
+#define VM_FORCE_INLINE static
+#endif
+
 //
 extern uintptr_t data_seg_addr;
 extern uintptr_t code_seg_addr;
@@ -30,32 +36,32 @@ uint32_t xorshift32(uint32_t *state)
     return *state = x;
 }
 
-static void vm_set_fault(uint32_t fault_code) {
+VM_FORCE_INLINE void vm_set_fault(uint32_t fault_code) {
     if (vm_fault == VM_FAULT_NONE)
         vm_fault = fault_code;
 }
 
-static int vm_width_valid(int size) {
+VM_FORCE_INLINE int vm_width_valid(int size) {
     return size >= 0 && size <= 8;
 }
 
-static int vm_range_valid(uint64_t offset, uint64_t size, uint64_t limit) {
+VM_FORCE_INLINE int vm_range_valid(uint64_t offset, uint64_t size, uint64_t limit) {
     return offset <= limit && size <= limit - offset;
 }
 
-static int vm_address_is_data_related(uint64_t address) {
+VM_FORCE_INLINE int vm_address_is_data_related(uint64_t address) {
     if (data_seg_addr == 0 || address < data_seg_addr)
         return 0;
     return address - data_seg_addr <= data_seg_size;
 }
 
-static void vm_fail_closed(void) {
+VM_FORCE_INLINE void vm_fail_closed(void) {
 #ifndef VMP_TEST_NO_TRAP
     __builtin_trap();
 #endif
 }
 
-static int vm_set_ip(uint64_t target) {
+VM_FORCE_INLINE int vm_set_ip(uint64_t target) {
     if (target >= code_seg_size || target > 0x7fffffffULL) {
         vm_set_fault(VM_FAULT_CODE_RANGE);
         return 0;
@@ -494,6 +500,8 @@ void gep_handler() {
     uint64_t ptr_value = get_value();
 
     uint64_t idx_value = get_value();
+    if (vm_fault != VM_FAULT_NONE)
+        return;
 
     uint64_t res_value = 0;
 
@@ -594,6 +602,8 @@ void br_handler() {
         uint64_t condition_value = get_value();
         uint64_t true_br = unpack_code(pointer_size);
         uint64_t false_br = unpack_code(pointer_size);
+        if (vm_fault != VM_FAULT_NONE)
+            return;
 
         if (condition_value) {
             target_addr = true_br;
@@ -622,6 +632,24 @@ void switch_handler() {
 
     // default target
     uint64_t default_target = unpack_code(pointer_size);
+    if (vm_fault != VM_FAULT_NONE)
+        return;
+    if (case_val_size == 0 || case_val_size > 8 || pointer_size != 8) {
+        vm_set_fault(VM_FAULT_INVALID_SIZE);
+        return;
+    }
+
+    const uint64_t bytes_per_case =
+        (uint64_t)case_val_size + (uint64_t)pointer_size;
+    if (ip < 0 || (uint64_t)ip > code_seg_size) {
+        vm_set_fault(VM_FAULT_CODE_RANGE);
+        return;
+    }
+    const uint64_t remaining_code = code_seg_size - (uint64_t)ip;
+    if ((uint64_t)num_cases > remaining_code / bytes_per_case) {
+        vm_set_fault(VM_FAULT_CODE_RANGE);
+        return;
+    }
 
     uint64_t matched_target = default_target;
 
@@ -734,14 +762,10 @@ void return_handler() {
     uint8_t var_type = get_byte_code();
     uint64_t ret_value = get_value_with_size(var_size, var_type);
 
-    if (var_size != 0 || var_type != 0) {
+    if (var_size != 0 || var_type != 0)
         pack_data(0, ret_value, var_size);
-    }
-    // we dont know data_seg size, may segmentfault
-    // data_seg_clean(var_size);
-    // for (unsigned i=var_size; i<SEG_SIZE; i++) {
-    //     ((uint8_t *)data_seg_addr)[i] = 0;
-    // }
+    if (vm_fault == VM_FAULT_NONE)
+        data_seg_clean((int)var_size);
 }
 
 // call_handler is declared extern in the header and replaced at link time

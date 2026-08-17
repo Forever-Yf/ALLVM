@@ -1,0 +1,94 @@
+name: Usability smoke checks
+
+on:
+  pull_request:
+    paths:
+      - "configs/profiles/**"
+      - "docs/ALLVM_USAGE_CN.md"
+      - "tools/allvm.py"
+      - "tools/test-allvm-cli.py"
+      - ".github/workflows/usability-smoke.yml"
+  push:
+    branches:
+      - "usability/**"
+    paths:
+      - "configs/profiles/**"
+      - "docs/ALLVM_USAGE_CN.md"
+      - "tools/allvm.py"
+      - "tools/test-allvm-cli.py"
+      - ".github/workflows/usability-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: usability-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python39-compatibility:
+    name: Python 3.9 CLI compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            configs/profiles
+            tools/allvm.py
+            tools/allvm-doctor.py
+          sparse-checkout-cone-mode: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Compile and exercise public entrypoints
+        run: |
+          python -m py_compile tools/allvm.py tools/allvm-doctor.py
+          python tools/allvm.py --version
+          python tools/allvm.py profile list
+          python tools/allvm.py render --profile compat --format cmake > /tmp/compat.cmake
+          python tools/allvm.py render --profile balanced --format ndk-build > /tmp/balanced.mk
+          python tools/allvm.py render --profile strong --format json > /tmp/strong.json
+          grep -q 'allvm_apply' /tmp/compat.cmake
+          grep -q 'LOCAL_CFLAGS' /tmp/balanced.mk
+          grep -q 'irobf-vmp-max-runtime-steps' /tmp/strong.json
+
+  linux-regression:
+    name: Linux CLI and isolated NDK regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            configs/profiles
+            tools/allvm.py
+            tools/allvm-doctor.py
+            tools/test-allvm-cli.py
+          sparse-checkout-cone-mode: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run standard-library regression suite
+        run: |
+          python -m py_compile tools/allvm.py tools/test-allvm-cli.py
+          python tools/test-allvm-cli.py
+
+  windows-regression:
+    name: Windows CLI and isolated NDK regression
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            configs/profiles
+            tools/allvm.py
+            tools/allvm-doctor.py
+            tools/test-allvm-cli.py
+          sparse-checkout-cone-mode: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run standard-library regression suite
+        shell: pwsh
+        run: |
+          python -m py_compile tools/allvm.py tools/test-allvm-cli.py
+          python tools/test-allvm-cli.py

@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   python39-compatibility:
-    name: Python 3.9 CLI, sync and Gradle compatibility
+    name: Python 3.9 CLI, sync, Gradle and overlay compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,6 +59,8 @@ jobs:
           python -m py_compile allvm.py tools/allvm.py tools/allvm-doctor.py
           python allvm.py --version
           sh allvm.sh profile list
+          python allvm.py overlay status --help > /dev/null
+          python allvm.py overlay update --help > /dev/null
 
           python tools/allvm.py render --profile compat --format cmake \
             > /tmp/compat.cmake
@@ -97,7 +99,7 @@ jobs:
           python allvm.py sync --directory "$project" --check
 
   linux-regression:
-    name: Linux CLI, project sync and isolated NDK regression
+    name: Linux CLI, sync and manifest-safe NDK overlay regression
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -128,7 +130,7 @@ jobs:
           python tools/test-allvm-cli.py
 
   windows-regression:
-    name: Windows CLI, project sync and isolated NDK regression
+    name: Windows CLI, sync and manifest-safe NDK overlay regression
     runs-on: windows-latest
     timeout-minutes: 10
     steps:

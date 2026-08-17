@@ -1,5 +1,3 @@
-# StringEncryptionAuthenticated.cpp is a compatibility shim for external
-# scripts. Do not compile it together with StringEncryptionAuthenticatedV2.cpp.
 add_llvm_library(LLVMObfuscation
   LicenseManager.cpp
   CryptoUtils.cpp
@@ -11,7 +9,7 @@ add_llvm_library(LLVMObfuscation
   IndirectGlobalVariable.cpp
   Flattening.cpp
   AuthenticatedStringIR.cpp
-  StringEncryptionAuthenticatedV2.cpp
+  StringEncryption.cpp
   LegacyLowerSwitch.cpp
   ConstantIntEncryption.cpp
   ConstantFPEncryption.cpp

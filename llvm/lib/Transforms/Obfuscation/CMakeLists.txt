@@ -1,3 +1,5 @@
+# StringEncryptionAuthenticated.cpp is a compatibility shim for external
+# scripts. Do not compile it together with StringEncryptionAuthenticatedV2.cpp.
 add_llvm_library(LLVMObfuscation
   LicenseManager.cpp
   CryptoUtils.cpp

@@ -327,6 +327,51 @@ class AllvmCliTests(unittest.TestCase):
             self.run_cli("overlay", "remove", "--path", str(overlay), "--yes")
             self.assertFalse(overlay.exists())
 
+    def test_overlay_rejects_manifest_path_escape_and_detects_new_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ndk, allvm_bin, _ = self.make_fake_ndk(root)
+            optional_lld = allvm_bin / tool_name("lld")
+            optional_lld.unlink()
+            overlay = root / "overlay"
+
+            self.run_cli(
+                "overlay",
+                "create",
+                "--ndk",
+                str(ndk),
+                "--allvm-bin",
+                str(allvm_bin),
+                "--output",
+                str(overlay),
+                "--mode",
+                "copy",
+            )
+
+            optional_lld.write_text("allvm-lld-new\n", encoding="utf-8")
+            status = self.run_cli(
+                "overlay", "status", "--path", str(overlay), "--json"
+            )
+            payload = json.loads(status.stdout)
+            lld = next(item for item in payload["tools"] if item["name"] == "lld")
+            self.assertTrue(lld["new_tool"])
+            self.assertTrue(lld["update_available"])
+            self.run_cli("overlay", "update", "--path", str(overlay))
+
+            manifest_path = overlay / ".allvm-overlay.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["installed_tools"][0]["path"] = "../outside-tool"
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            refused = self.run_cli(
+                "overlay", "update", "--path", str(overlay), expected=2
+            )
+            self.assertIn("安全相对路径", refused.stderr)
+            self.assertFalse((root / "outside-tool").exists())
+
     def test_overlay_force_refuses_unmarked_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

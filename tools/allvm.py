@@ -741,24 +741,96 @@ def manifest_path(overlay: Path) -> Path:
     return overlay / OVERLAY_MANIFEST
 
 
+def manifest_relative_path(value: Any, *, field: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise CliError(f"overlay manifest 的 {field} 必须是非空字符串")
+    relative = Path(value)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise CliError(f"overlay manifest 的 {field} 不是安全相对路径：{value!r}")
+    return relative
+
+
+def confined_manifest_path(root: Path, value: Any, *, field: str) -> Path:
+    root = root.expanduser().resolve()
+    relative = manifest_relative_path(value, field=field)
+    candidate = root / relative
+    try:
+        resolved_parent = candidate.parent.resolve(strict=True)
+    except OSError as exc:
+        raise CliError(
+            f"overlay manifest 的 {field} 父目录不可访问：{candidate.parent}: {exc}"
+        ) from exc
+    if not is_relative_to(resolved_parent, root):
+        raise CliError(f"overlay manifest 的 {field} 逃逸出受管目录：{value!r}")
+    if candidate.is_symlink():
+        try:
+            resolved_target = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise CliError(
+                f"overlay manifest 的 {field} 是损坏的符号链接：{candidate}: {exc}"
+            ) from exc
+        if not is_relative_to(resolved_target, root):
+            raise CliError(
+                f"overlay manifest 的 {field} 符号链接逃逸出受管目录：{value!r}"
+            )
+    return candidate
+
+
+def manifest_object_list(value: Mapping[str, Any], field: str) -> list[Mapping[str, Any]]:
+    items = value.get(field, [])
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise CliError(f"overlay manifest 的 {field} 必须是对象数组")
+    return items
+
 def load_overlay_manifest(overlay: Path) -> Mapping[str, Any]:
+    overlay = overlay.expanduser().resolve()
     marker = manifest_path(overlay)
     value = load_json(marker)
     if value.get("schema") != 1 or value.get("type") != "allvm-ndk-overlay":
         raise CliError(f"不是受支持的 ALLVM overlay：{marker}")
+
+    recorded_overlay = value.get("overlay")
+    if not isinstance(recorded_overlay, str) or not recorded_overlay.strip():
+        raise CliError(f"overlay manifest 缺少 overlay 路径：{marker}")
+    if Path(recorded_overlay).expanduser().resolve() != overlay:
+        raise CliError(
+            f"overlay manifest 路径与当前目录不一致：{recorded_overlay!r} != {overlay}"
+        )
+
+    source_value = value.get("source_ndk")
+    if not isinstance(source_value, str) or not source_value.strip():
+        raise CliError(f"overlay manifest 缺少 source_ndk：{marker}")
+    source = Path(source_value).expanduser().resolve()
+    if source == overlay:
+        raise CliError("overlay manifest 把源 NDK 指向了 overlay 自身")
+
+    host_prebuilt = manifest_relative_path(
+        value.get("host_prebuilt"), field="host_prebuilt"
+    )
+    confined_manifest_path(overlay, str(host_prebuilt), field="host_prebuilt")
+    manifest_object_list(value, "installed_tools")
+    manifest_object_list(value, "source_tools")
     return value
 
 
 def overlay_verifications(overlay: Path) -> list[Verification]:
+    overlay = overlay.expanduser().resolve()
     manifest = load_overlay_manifest(overlay)
     checks: list[Verification] = []
-    source = Path(str(manifest.get("source_ndk", ""))).expanduser().resolve()
+    source = Path(str(manifest["source_ndk"])).expanduser().resolve()
 
     checks.append(
         Verification(
             "overlay 与源目录隔离",
-            overlay.resolve() != source,
-            f"overlay={overlay.resolve()}, source={source}",
+            overlay != source,
+            f"overlay={overlay}, source={source}",
+        )
+    )
+    checks.append(
+        Verification(
+            "manifest overlay 路径",
+            Path(str(manifest["overlay"])).expanduser().resolve() == overlay,
+            str(manifest["overlay"]),
         )
     )
     checks.append(
@@ -769,9 +841,13 @@ def overlay_verifications(overlay: Path) -> list[Verification]:
         )
     )
 
-    for item in manifest.get("installed_tools", []):
-        relative = Path(str(item.get("path", "")))
-        path = overlay / relative
+    for index, item in enumerate(manifest_object_list(manifest, "installed_tools")):
+        relative = manifest_relative_path(
+            item.get("path"), field=f"installed_tools[{index}].path"
+        )
+        path = confined_manifest_path(
+            overlay, str(relative), field=f"installed_tools[{index}].path"
+        )
         expected = str(item.get("sha256", ""))
         actual = sha256_file(path) if path.is_file() else "missing"
         checks.append(
@@ -782,9 +858,13 @@ def overlay_verifications(overlay: Path) -> list[Verification]:
             )
         )
 
-    for item in manifest.get("source_tools", []):
-        relative = Path(str(item.get("path", "")))
-        path = source / relative
+    for index, item in enumerate(manifest_object_list(manifest, "source_tools")):
+        relative = manifest_relative_path(
+            item.get("path"), field=f"source_tools[{index}].path"
+        )
+        path = confined_manifest_path(
+            source, str(relative), field=f"source_tools[{index}].path"
+        )
         expected = str(item.get("sha256", ""))
         actual = sha256_file(path) if path.is_file() else "missing"
         checks.append(
@@ -1314,11 +1394,24 @@ def overlay_status_payload(overlay: Path, *, include_size: bool) -> dict[str, An
     allvm_bin = Path(str(manifest.get("allvm_bin", ""))).expanduser().resolve()
     available_tools = collect_allvm_tools(allvm_bin, require_compilers=False)
 
+    installed_items = manifest_object_list(manifest, "installed_tools")
+    installed_by_name = {
+        str(item.get("name", "")): item
+        for item in installed_items
+        if isinstance(item.get("name"), str) and str(item.get("name")).strip()
+    }
+    names = sorted(
+        set(installed_by_name) | set(available_tools),
+        key=lambda name: (("clang", "clang++", "ld.lld", "lld").index(name)
+                          if name in ("clang", "clang++", "ld.lld", "lld") else 99,
+                          name),
+    )
+
     updates: list[dict[str, Any]] = []
-    for item in manifest.get("installed_tools", []):
-        name = str(item.get("name", ""))
+    for name in names:
+        item = installed_by_name.get(name)
         current_source = available_tools.get(name)
-        installed_sha = str(item.get("sha256", ""))
+        installed_sha = str(item.get("sha256", "")) if item else None
         if current_source is None:
             updates.append(
                 {
@@ -1327,6 +1420,7 @@ def overlay_status_payload(overlay: Path, *, include_size: bool) -> dict[str, An
                     "installed_sha256": installed_sha,
                     "source_sha256": None,
                     "update_available": False,
+                    "new_tool": False,
                 }
             )
             continue
@@ -1337,7 +1431,8 @@ def overlay_status_payload(overlay: Path, *, include_size: bool) -> dict[str, An
                 "source": str(current_source),
                 "installed_sha256": installed_sha,
                 "source_sha256": source_sha,
-                "update_available": source_sha != installed_sha,
+                "update_available": installed_sha != source_sha,
+                "new_tool": item is None,
             }
         )
 
@@ -1413,23 +1508,28 @@ def command_overlay_update(args: argparse.Namespace) -> int:
     else:
         allvm_bin = Path(str(manifest.get("allvm_bin", ""))).expanduser().resolve()
     tools = collect_allvm_tools(allvm_bin)
-    relative_prebuilt = Path(str(manifest.get("host_prebuilt", "")))
-    if not relative_prebuilt.parts:
-        raise CliError("overlay manifest 缺少 host_prebuilt")
+    relative_prebuilt = manifest_relative_path(
+        manifest.get("host_prebuilt"), field="host_prebuilt"
+    )
+    confined_manifest_path(overlay, str(relative_prebuilt), field="host_prebuilt")
 
     installed_by_name = {
         str(item.get("name", "")): dict(item)
-        for item in manifest.get("installed_tools", [])
-        if isinstance(item, dict) and item.get("name")
+        for item in manifest_object_list(manifest, "installed_tools")
+        if isinstance(item.get("name"), str) and str(item.get("name")).strip()
     }
     planned: list[dict[str, Any]] = []
     for name, source_tool in tools.items():
         existing = installed_by_name.get(name)
         if existing and existing.get("path"):
-            relative = Path(str(existing["path"]))
+            relative = manifest_relative_path(
+                existing["path"], field=f"installed_tools[{name}].path"
+            )
         else:
             relative = relative_prebuilt / "bin" / host_tool_name(name)
-        target = overlay / relative
+        target = confined_manifest_path(
+            overlay, str(relative), field=f"installed_tools[{name}].path"
+        )
         source_sha = sha256_file(source_tool)
         target_sha = sha256_file(target) if target.is_file() else "missing"
         planned.append(

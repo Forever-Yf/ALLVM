@@ -206,7 +206,7 @@ python3 allvm.py overlay update \
   --allvm-bin /path/to/new/allvm/bin
 ```
 
-`update` 会先验证源 NDK 哈希；源工具发生变化时拒绝更新。省略 `--allvm-bin` 时使用 manifest 中记录的目录。查看原始 manifest：
+`update` 会先验证源 NDK 哈希；源工具发生变化时拒绝更新。manifest 中的工具和 prebuilt 路径必须是受限相对路径，绝对路径、`..` 和逃逸到 overlay/源 NDK 外部的符号链接都会被拒绝。新出现的可选 `lld` 也会在 `status` 中显示为可更新。省略 `--allvm-bin` 时使用 manifest 中记录的目录。查看原始 manifest：
 
 ```bash
 python3 allvm.py overlay info --path ~/.allvm/ndk/r29-allvm

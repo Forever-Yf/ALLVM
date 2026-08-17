@@ -32,6 +32,7 @@ static int testRecordRoundTrip() {
   std::array<uint8_t, 80> Plain{};
   std::array<uint8_t, 128> Record{};
   std::array<uint8_t, 80> Output{};
+  constexpr uint32_t PlainSize = 80U;
   for (unsigned I = 0; I < Key.size(); ++I) {
     Key[I] = static_cast<uint8_t>(I);
     ShareA[I] = static_cast<uint8_t>(I * 7U + 3U);
@@ -43,7 +44,7 @@ static int testRecordRoundTrip() {
     Plain[I] = static_cast<uint8_t>(I * 3U + 1U);
 
   if (!allvm_str_seal_record(Record.data(), Record.size(), Plain.data(),
-                              Plain.size(), Key.data(), Nonce.data(), 7U, 19U,
+                              PlainSize, Key.data(), Nonce.data(), 7U, 19U,
                               0U))
     return 1;
   if (allvm_str_load64_le(Record.data() + ALLVM_STR_TAG0_OFFSET) !=
@@ -54,7 +55,7 @@ static int testRecordRoundTrip() {
     return 3;
   if (!allvm_str_open_record_split(
           Output.data(), Record.data(), Record.size(), ShareA.data(),
-          ShareB.data(), 7U, 19U, 0U, Plain.size()))
+          ShareB.data(), 7U, 19U, 0U, PlainSize))
     return 4;
   if (Output != Plain)
     return 5;
@@ -63,7 +64,7 @@ static int testRecordRoundTrip() {
   Output.fill(0x55U);
   if (allvm_str_open_record_split(
           Output.data(), Record.data(), Record.size(), ShareA.data(),
-          ShareB.data(), 7U, 19U, 0U, Plain.size()))
+          ShareB.data(), 7U, 19U, 0U, PlainSize))
     return 6;
   for (uint8_t Byte : Output)
     if (Byte != 0U)
@@ -79,6 +80,7 @@ static int testHeaderBindingAndUtf16() {
   const std::array<uint8_t, 6> Plain = {0x41, 0x00, 0x42, 0x00, 0x00, 0x00};
   std::array<uint8_t, ALLVM_STR_HEADER_SIZE + Plain.size()> Record{};
   std::array<uint8_t, Plain.size()> Output{};
+  constexpr uint32_t PlainSize = 6U;
   for (unsigned I = 0; I < Key.size(); ++I) {
     Key[I] = static_cast<uint8_t>(0xffU - I);
     ShareA[I] = static_cast<uint8_t>(I * 5U + 11U);
@@ -88,12 +90,12 @@ static int testHeaderBindingAndUtf16() {
     Nonce[I] = static_cast<uint8_t>(I * 9U + 1U);
 
   if (!allvm_str_seal_record(
-          Record.data(), Record.size(), Plain.data(), Plain.size(), Key.data(),
+          Record.data(), Record.size(), Plain.data(), PlainSize, Key.data(),
           Nonce.data(), 3U, 64U, ALLVM_STR_FLAG_UTF16))
     return 1;
   if (!allvm_str_open_record_split(
           Output.data(), Record.data(), Record.size(), ShareA.data(),
-          ShareB.data(), 3U, 64U, ALLVM_STR_FLAG_UTF16, Plain.size()))
+          ShareB.data(), 3U, 64U, ALLVM_STR_FLAG_UTF16, PlainSize))
     return 2;
   if (Output != Plain)
     return 3;
@@ -101,7 +103,7 @@ static int testHeaderBindingAndUtf16() {
   Output.fill(0x66U);
   if (allvm_str_open_record_split(
           Output.data(), Record.data(), Record.size(), ShareA.data(),
-          ShareB.data(), 4U, 64U, ALLVM_STR_FLAG_UTF16, Plain.size()))
+          ShareB.data(), 4U, 64U, ALLVM_STR_FLAG_UTF16, PlainSize))
     return 4;
   for (uint8_t Byte : Output)
     if (Byte != 0U)

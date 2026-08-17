@@ -6,8 +6,9 @@ on:
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
       - "llvm/include/llvm/Transforms/Obfuscation/StringEncryption.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
-      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated*.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "configs/profiles/strong.json"
       - "tools/string-*-smoke.cpp"
       - "tools/check-hardening.py"
       - "README.md"
@@ -20,8 +21,9 @@ on:
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
       - "llvm/include/llvm/Transforms/Obfuscation/StringEncryption.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
-      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated*.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "configs/profiles/strong.json"
       - "tools/string-*-smoke.cpp"
       - "tools/check-hardening.py"
       - "README.md"
@@ -47,12 +49,12 @@ jobs:
             llvm/include/llvm/CryptoUtils.h
             llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp
-            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
-            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
             llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
             llvm/lib/Transforms/Obfuscation/LicenseManager.cpp
             llvm/lib/Transforms/Obfuscation/ObfuscationOptions.cpp
             llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+            configs/profiles/strong.json
             tools/string-crypto-smoke.cpp
             tools/string-runtime-ir-smoke.cpp
             tools/string-pass-smoke.cpp
@@ -127,7 +129,7 @@ jobs:
           grep -q '@__allvm_str_tag_v1' /tmp/string-runtime.ll
           grep -q 'llvm.memset' /tmp/string-runtime.ll
 
-      - name: Compile finalized authenticated string pass against LLVM headers
+      - name: Compile canonical authenticated string pass against LLVM headers
         shell: bash
         run: |
           CXX="$LLVM_BINDIR/clang++"
@@ -142,13 +144,12 @@ jobs:
             -Wno-deprecated-declarations \
             -Wno-sign-compare \
             -fsyntax-only \
-            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
           grep -q '^  AuthenticatedStringIR.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
-          grep -q '^  StringEncryptionAuthenticatedV2.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
-          ! grep -q '^  StringEncryption.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
-          ! grep -q '^  StringEncryptionAuthenticated.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
-          grep -q 'StringEncryptionAuthenticatedV2.cpp' \
-            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
+          grep -q '^  StringEncryption.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          grep -q 'irobf-cse-strict' configs/profiles/strong.json
+          grep -q 'irobf-cse-max-record-bytes=1048576' configs/profiles/strong.json
+          grep -q 'irobf-cse-max-table-bytes=67108864' configs/profiles/strong.json
 
       - name: Execute the complete pass output with global constructors
         shell: bash
@@ -171,7 +172,7 @@ jobs:
             -Wno-deprecated-declarations \
             -Wno-sign-compare \
             llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp \
-            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp \
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp \
             llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp \
             llvm/lib/Transforms/Obfuscation/LicenseManager.cpp \
             llvm/lib/Transforms/Obfuscation/ObfuscationOptions.cpp \

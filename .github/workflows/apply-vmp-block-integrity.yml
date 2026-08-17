@@ -1,0 +1,158 @@
+name: Apply VMP block integrity hardening
+
+on:
+  push:
+    branches:
+      - hardening/p0-secure-seeding-doctor
+    paths:
+      - .github/workflows/apply-vmp-block-integrity.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out required files
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/workflows/apply-vmp-block-integrity.yml
+            .github/patches
+            .github/workflows/hardening-smoke.yml
+            README.md
+            docs/ALLVM_HARDENING.md
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/aVMPInterpreter.bc
+            llvm/include/llvm/CryptoUtils.h
+            llvm/include/llvm/Transforms/Obfuscation
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            tools/allvm-doctor.py
+            tools/check-hardening.py
+            tools/check-vmp-embed.py
+            tools/vmp-compatibility-smoke.cpp
+            tools/vmp-interpreter-bounds-smoke.c
+          sparse-checkout-cone-mode: false
+
+      - name: Decode and apply integrity patch
+        shell: bash
+        run: |
+          cat .github/patches/vmp-integrity-*.b64 > /tmp/apply-vmp-integrity.py.gz.b64
+          base64 -d /tmp/apply-vmp-integrity.py.gz.b64 | gzip -d > /tmp/apply-vmp-integrity.py
+          test "$(sha256sum /tmp/apply-vmp-integrity.py | cut -d' ' -f1)" = "34ce580f2452d39e69e0fe9eba5b26be963e6cd7a226c69e2ff35cfbe5d7b0ab"
+          python3 -m py_compile /tmp/apply-vmp-integrity.py
+          python3 /tmp/apply-vmp-integrity.py
+
+      - name: Locate installed LLVM
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then LLVM_CONFIG="$(command -v llvm-config || true)"; fi
+          if [ -z "$LLVM_CONFIG" ]; then
+            echo "No installed llvm-config was found" >&2
+            exit 1
+          fi
+          echo "LLVM_CONFIG=$LLVM_CONFIG" >> "$GITHUB_ENV"
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Build and run native VMP integrity tests
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang || command -v cc)"; fi
+          "$CC"             -std=c11             -Wall -Wextra -Werror             -Wno-unused-function             -Wno-unused-variable             -Wno-unused-parameter             -Wno-strict-aliasing             tools/vmp-interpreter-bounds-smoke.c             -o /tmp/vmp-interpreter-bounds-smoke
+          /tmp/vmp-interpreter-bounds-smoke
+
+      - name: Regenerate embedded interpreter bitcode
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+
+          "$CC"             -O2 -emit-llvm -c             -target x86_64-pc-windows-msvc             aVMPInterpreter/aVMPInterpreter.c             -o aVMPInterpreter/aVMPInterpreter.bc
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          bitcode = Path("aVMPInterpreter/aVMPInterpreter.bc").read_bytes()
+          lines = [
+              "#ifndef ALLVM_EMBEDDED_VMP_IR_H",
+              "#define ALLVM_EMBEDDED_VMP_IR_H",
+              "",
+              "#include <vector>",
+              "",
+              f"static const int binary_ir_length = {len(bitcode)};",
+              "static const char binary_ir_data[] =",
+          ]
+          for offset in range(0, len(bitcode), 16):
+              chunk = bitcode[offset:offset + 16]
+              lines.append('"' + ''.join(f"\\x{byte:02x}" for byte in chunk) + '"')
+          lines.extend([
+              ";",
+              "",
+              "static std::vector<char> get_binary_ir() {",
+              "    return std::vector<char>(binary_ir_data, binary_ir_data + binary_ir_length);",
+              "}",
+              "",
+              "#endif // ALLVM_EMBEDDED_VMP_IR_H",
+              "",
+          ])
+          Path("llvm/include/llvm/Transforms/Obfuscation/vm.h").write_text(
+              "\n".join(lines), encoding="utf-8"
+          )
+          PY
+
+          python3 tools/check-vmp-embed.py
+          "$LLVM_DIS" aVMPInterpreter/aVMPInterpreter.bc -o /tmp/aVMPInterpreter.ll
+          grep -q '@vm_integrity_key' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_block_end' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_active' /tmp/aVMPInterpreter.ll
+          grep -q 'llvm.trap' /tmp/aVMPInterpreter.ll
+          awk '/define .*@vm_interpreter\(/,/^}/' /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
+          ! grep -E 'call .*@(vm_enter_block|allvm_vmp_blake2s_|allvm_vmp_block_tag|allvm_vmp_tag_equal)' /tmp/vm_interpreter.ll
+
+      - name: Compile VMP compatibility and integration
+        shell: bash
+        run: |
+          mkdir -p /tmp/allvm-include/llvm/Transforms /tmp/allvm-include/llvm
+          cp -R llvm/include/llvm/Transforms/Obfuscation /tmp/allvm-include/llvm/Transforms/
+          cp llvm/include/llvm/CryptoUtils.h /tmp/allvm-include/llvm/CryptoUtils.h
+
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core asmparser support)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+
+          "$CXX"             -I/tmp/allvm-include             "${LLVM_CXXFLAGS[@]}"             -std=c++17             -Wall -Wextra             -Wno-unused-parameter             -fsyntax-only             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+
+          "$CXX"             -I/tmp/allvm-include             "${LLVM_CXXFLAGS[@]}"             -std=c++17             -Wall -Wextra             -Wno-unused-parameter             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp             tools/vmp-compatibility-smoke.cpp             "${LLVM_LDFLAGS[@]}"             "${LLVM_LIBS[@]}"             "${LLVM_SYSTEM_LIBS[@]}"             -o /tmp/vmp-compatibility-smoke
+          /tmp/vmp-compatibility-smoke
+
+          "$CXX"             -I/tmp/allvm-include             "${LLVM_CXXFLAGS[@]}"             -std=c++17             -Wno-unused-function             -Wno-unused-variable             -Wno-unused-but-set-variable             -Wno-sign-compare             -Wno-deprecated-declarations             -fsyntax-only             llvm/lib/Transforms/Obfuscation/aVMP.cpp
+
+      - name: Run repository hardening checks
+        shell: bash
+        run: |
+          python3 -m py_compile             tools/allvm-doctor.py             tools/check-hardening.py             tools/check-vmp-embed.py
+          python3 tools/check-hardening.py --compile-header
+          python3 tools/check-vmp-embed.py
+
+      - name: Remove one-time workflow and commit
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-vmp-block-integrity.yml
+          git rm .github/patches/vmp-integrity-*.b64
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "authenticate VMP blocks and reject recursive reentry"
+          git push origin HEAD:hardening/p0-secure-seeding-doctor

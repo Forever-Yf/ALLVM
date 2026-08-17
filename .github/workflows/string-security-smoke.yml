@@ -5,10 +5,8 @@ on:
     paths:
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
-      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated*.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
-      - "llvm/lib/Transforms/Obfuscation/ObfuscationPassManager.cpp"
-      - "llvm/lib/Transforms/Obfuscation/IndirectCall.cpp"
       - "tools/string-*-smoke.cpp"
       - "tools/check-hardening.py"
       - "README.md"
@@ -20,10 +18,8 @@ on:
     paths:
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
-      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated*.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
-      - "llvm/lib/Transforms/Obfuscation/ObfuscationPassManager.cpp"
-      - "llvm/lib/Transforms/Obfuscation/IndirectCall.cpp"
       - "tools/string-*-smoke.cpp"
       - "tools/check-hardening.py"
       - "README.md"
@@ -50,6 +46,7 @@ jobs:
             llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp
             llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp
             llvm/lib/Transforms/Obfuscation/CMakeLists.txt
             tools/string-crypto-smoke.cpp
             tools/string-runtime-ir-smoke.cpp
@@ -124,7 +121,7 @@ jobs:
           grep -q '@__allvm_str_tag_v1' /tmp/string-runtime.ll
           grep -q 'llvm.memset' /tmp/string-runtime.ll
 
-      - name: Compile authenticated string pass against LLVM headers
+      - name: Compile finalized authenticated string pass against LLVM headers
         shell: bash
         run: |
           CXX="$LLVM_BINDIR/clang++"
@@ -139,10 +136,13 @@ jobs:
             -Wno-deprecated-declarations \
             -Wno-sign-compare \
             -fsyntax-only \
-            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
-          grep -q 'AuthenticatedStringIR.cpp' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
-          grep -q 'StringEncryptionAuthenticated.cpp' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp
+          grep -q '^  AuthenticatedStringIR.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          grep -q '^  StringEncryptionAuthenticatedV2.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
           ! grep -q '^  StringEncryption.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          ! grep -q '^  StringEncryptionAuthenticated.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          grep -q 'StringEncryptionAuthenticatedV2.cpp' \
+            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
 
   windows-primitives:
     name: Windows authenticated record vectors

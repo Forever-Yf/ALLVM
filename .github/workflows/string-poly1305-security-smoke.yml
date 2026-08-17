@@ -1,0 +1,198 @@
+name: ChaCha20-Poly1305 string security checks
+
+on:
+  pull_request:
+    paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringPoly1305Crypto.h"
+      - "llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/string-poly1305-*-smoke.cpp"
+      - "tools/string-pass-smoke.cpp"
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
+      - "docs/AUTHENTICATED_STRINGS_CN.md"
+      - ".github/workflows/string-poly1305-security-smoke.yml"
+  push:
+    branches:
+      - "security/p4-chacha20-poly1305-strings"
+    paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringPoly1305Crypto.h"
+      - "llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/string-poly1305-*-smoke.cpp"
+      - "tools/string-pass-smoke.cpp"
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
+      - "docs/AUTHENTICATED_STRINGS_CN.md"
+      - ".github/workflows/string-poly1305-security-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poly1305-string-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-runtime:
+    name: Linux Poly1305 vectors, generated runtime and pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            llvm/include/llvm/CryptoUtils.h
+            llvm/include/llvm/Transforms/Obfuscation
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+            tools/string-poly1305-crypto-smoke.cpp
+            tools/string-poly1305-runtime-ir-smoke.cpp
+            tools/string-pass-smoke.cpp
+          sparse-checkout-cone-mode: true
+
+      - name: Locate the newest installed LLVM toolchain
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then LLVM_CONFIG="$(command -v llvm-config || true)"; fi
+          if [ -z "$LLVM_CONFIG" ]; then
+            echo "No installed llvm-config was found" >&2
+            exit 1
+          fi
+          echo "LLVM_CONFIG=$LLVM_CONFIG" >> "$GITHUB_ENV"
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Build an ALLVM-only header overlay
+        shell: bash
+        run: |
+          mkdir -p /tmp/allvm-include/llvm/Transforms /tmp/allvm-include/llvm
+          cp -R llvm/include/llvm/Transforms/Obfuscation /tmp/allvm-include/llvm/Transforms/
+          cp llvm/include/llvm/CryptoUtils.h /tmp/allvm-include/llvm/CryptoUtils.h
+
+      - name: Build and run Poly1305 and record-v2 vectors
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          "$CXX" \
+            -I/tmp/allvm-include \
+            -std=c++17 \
+            -Wall -Wextra -Werror \
+            tools/string-poly1305-crypto-smoke.cpp \
+            -o /tmp/string-poly1305-crypto-smoke
+          /tmp/string-poly1305-crypto-smoke
+
+      - name: Build and execute generated record-v2 LLVM runtime
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          LLI="$LLVM_BINDIR/lli"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          if [ ! -x "$LLI" ]; then LLI="$(command -v lli)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core bitwriter support)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra -Werror -Wno-unused-parameter \
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp \
+            tools/string-poly1305-runtime-ir-smoke.cpp \
+            "${LLVM_LDFLAGS[@]}" \
+            "${LLVM_LIBS[@]}" \
+            "${LLVM_SYSTEM_LIBS[@]}" \
+            -o /tmp/string-poly1305-runtime-ir-smoke
+          /tmp/string-poly1305-runtime-ir-smoke /tmp/string-poly1305-runtime.bc
+          "$LLI" /tmp/string-poly1305-runtime.bc
+          "$LLVM_DIS" /tmp/string-poly1305-runtime.bc -o /tmp/string-poly1305-runtime.ll
+          grep -q '@__allvm_string_open_v2' /tmp/string-poly1305-runtime.ll
+          grep -q '@__allvm_str_chacha_block_v2' /tmp/string-poly1305-runtime.ll
+          grep -q '@__allvm_str_poly_block_v2' /tmp/string-poly1305-runtime.ll
+          grep -q '@__allvm_str_poly1305_tag_v2' /tmp/string-poly1305-runtime.ll
+          grep -q 'i256' /tmp/string-poly1305-runtime.ll
+          grep -q 'llvm.memset' /tmp/string-poly1305-runtime.ll
+
+      - name: Compile production wrapper against LLVM headers
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra -Werror \
+            -Wno-unused-parameter \
+            -Wno-deprecated-declarations \
+            -Wno-sign-compare \
+            -fsyntax-only \
+            llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp
+          grep -q '^  AuthenticatedStringPoly1305IR.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+          grep -q '^  StringEncryptionPoly1305.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
+
+      - name: Build and run the production string pass
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core support passes bitwriter transformutils)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra \
+            -Wno-unused-parameter \
+            -Wno-deprecated-declarations \
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp \
+            llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp \
+            tools/string-pass-smoke.cpp \
+            "${LLVM_LDFLAGS[@]}" \
+            "${LLVM_LIBS[@]}" \
+            "${LLVM_SYSTEM_LIBS[@]}" \
+            -o /tmp/string-poly1305-pass-smoke
+          /tmp/string-poly1305-pass-smoke /tmp/string-poly1305-pass.bc
+          "$LLVM_BINDIR/llvm-dis" /tmp/string-poly1305-pass.bc -o /tmp/string-poly1305-pass.ll
+          grep -q '@__allvm_string_open_v2' /tmp/string-poly1305-pass.ll
+          grep -q '@__allvm_authenticated_string_table' /tmp/string-poly1305-pass.ll
+          grep -q '@__allvm_wipe_decrypted_strings' /tmp/string-poly1305-pass.ll
+          ! grep -q 'authenticated-pass-secret' /tmp/string-poly1305-pass.ll
+          ! grep -q 'wide-pass-secret' /tmp/string-poly1305-pass.ll
+          ! grep -q 'disabled-secret' /tmp/string-poly1305-pass.ll
+
+  windows-primitives:
+    name: Windows Poly1305 and record-v2 vectors
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h
+            llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringPoly1305Crypto.h
+            tools/string-poly1305-crypto-smoke.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Compile and run with MSVC strict warnings
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VS_INSTALL=%%i
+          if not defined VS_INSTALL exit /b 1
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /Illvm\include tools\string-poly1305-crypto-smoke.cpp /Fe:string-poly1305-crypto-smoke.exe
+          .\string-poly1305-crypto-smoke.exe

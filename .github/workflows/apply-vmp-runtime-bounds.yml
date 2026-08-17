@@ -47,8 +47,8 @@ jobs:
       - name: Remove one-time helpers
         run: |
           git rm .github/workflows/apply-vmp-runtime-bounds.yml
-          git rm tools/_apply_vmp_runtime_bounds.py
-          git rm tools/_fix_vmp_runtime_helper.py
+          git rm -f tools/_apply_vmp_runtime_bounds.py
+          git rm -f tools/_fix_vmp_runtime_helper.py
 
       - name: Commit runtime bounds
         shell: bash

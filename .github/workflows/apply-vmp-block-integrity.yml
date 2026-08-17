@@ -55,6 +55,11 @@ jobs:
           new = 'text = replace_once(text, "GlobalVariable * data_seg_addr;\\nGlobalVariable * code_seg_addr;\\n",\n    "GlobalVariable * data_seg_addr;\\nGlobalVariable * code_seg_addr;\\nGlobalVariable * vm_integrity_key;\\n", path)'
           if text.count(old) != 1:
               raise SystemExit("unexpected aVMP global patch marker")
+          text = text.replace(
+              '    switch_region + "void insertvalue_handler() {", path)',
+              '    switch_region, path)',
+              1,
+          )
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
           cp /tmp/apply-vmp-integrity.py tools/.apply-vmp-integrity.py

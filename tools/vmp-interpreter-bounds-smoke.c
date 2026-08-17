@@ -62,10 +62,11 @@ static unsigned encode_const_u64(uint8_t *buffer, uint64_t value) {
 
 static unsigned build_binary_code(uint8_t *code, uint8_t opcode,
                                   uint64_t left, uint64_t right) {
-    write_le(code, 0, 8); // result offset
-    code[8] = 8;         // result width
-    code[9] = 0;         // result type is currently unused by the handler
-    code[10] = opcode;
+    // binaryOperator_handler consumes: opcode, result type/offset, operands.
+    code[0] = opcode;
+    code[1] = 8; // result width
+    code[2] = 0; // result type is currently unused by the handler
+    write_le(code + 3, 0, 8); // result offset
 
     unsigned offset = 11;
     offset += encode_const_u64(code + offset, left);

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "name": "strong",
+  "title": "高强度（选择性 VMP）",
+  "description": "用于少量高价值、低频函数。提高常量、间接调用和分支等级，并对带 annotate(\"vmp\") 的函数启用严格 VMP。",
+  "compile_options": [
+    "-mllvm", "-irobf",
+    "-mllvm", "-irobf-cse",
+    "-mllvm", "-irobf-cie",
+    "-mllvm", "-level-cie=3",
+    "-mllvm", "-irobf-cfe",
+    "-mllvm", "-level-cfe=3",
+    "-mllvm", "-irobf-indgv",
+    "-mllvm", "-level-indgv=3",
+    "-mllvm", "-irobf-icall",
+    "-mllvm", "-level-icall=3",
+    "-mllvm", "-irobf-fla",
+    "-mllvm", "-irobf-indbr",
+    "-mllvm", "-level-indbr=3",
+    "-mllvm", "-irobf-vmp",
+    "-mllvm", "-irobf-vmp-strict",
+    "-mllvm", "-irobf-vmp-max-bbs=4096",
+    "-mllvm", "-irobf-vmp-max-instructions=50000",
+    "-mllvm", "-irobf-vmp-max-code-bytes=16777216",
+    "-mllvm", "-irobf-vmp-max-data-bytes=16777216",
+    "-mllvm", "-irobf-vmp-max-runtime-steps=10000000",
+    "-mllvm", "-irobf-vmp-max-runtime-calls=65536",
+    "-mllvm", "-irobf-vmp-max-call-depth=64"
+  ],
+  "cxx_options": [],
+  "link_options": [],
+  "notes": [
+    "VMP 只处理显式 annotate(\"vmp\") 的函数，不会自动虚拟化整个模块。",
+    "严格模式下不兼容函数会使构建失败，适合 CI 和发布管线。",
+    "首次接入应先使用 compat 或 balanced，再逐函数升级。"
+  ]
+}

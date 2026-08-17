@@ -171,7 +171,7 @@ llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
 - 估算代码和数据字节数；
 - 最多 16 条去重后的拒绝原因。
 
-预检按当前 uint64 解释器的真实能力保守放行：至多 64 位整数、普通地址空间指针、`float/double`、简单内存操作、受支持算术、无符号比较、简单 GEP、普通 C 调用、分支、switch 和返回。
+当前嵌入解释器以 64 位 `uintptr_t` 为 ABI，因此预检只放行 64 位目标。其核心子集包括：至多 64 位整数、普通地址空间指针、`float/double`、简单内存操作、受支持算术、无符号比较、简单 GEP、普通 C 调用、分支、switch 和返回。32 位目标会明确拒绝，而不是依赖截断行为。
 
 预检明确拒绝：
 
@@ -220,17 +220,71 @@ llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
 - ConstantExpr 在翻译时会被物化为等价指令，极晚期失败时尚未实现完整 IR 事务回滚；
 - VM 内部栈和调用栈的完整动态预算仍是后续工作。
 
-### 5.5 可执行行为测试
+### 5.5 运行时段边界与 fail-closed
 
-`tools/vmp-compatibility-smoke.cpp` 使用 LLVM AsmParser 解析真实 IR，验证：
+解释器 ABI 新增三个每函数元数据：
 
-- 普通标量控制流、空指针和含 padding 的结构体 GEP被接受；
-- PHI、atomic、signed compare、直接递归、可变参数调用、`undef` 和动态 alloca 被拒绝；
-- 指令上限可触发资源拒绝。
+```text
+code_seg_size : i64，只读
+数据段大小 data_seg_size : i64，只读
+vm_fault      : i32，线程局部、保存首个故障
+```
 
-CI 同时对 `VMPCompatibility.cpp` 和集成后的 `aVMP.cpp` 执行实际 C++/LLVM 语法编译。
+`aVMP.cpp` 从翻译器实际产生的 `vm_code.size()` 和 `curr_data_offset` 初始化长度，并把解释器 bitcode 中的 extern 声明映射到目标 Module 的对应全局变量。
 
-需要明确：兼容性预检和资源预算不能替代 VMP 字节码认证。现有字节流仍无篡改标签。
+故障代码包括：
+
+```text
+VM_FAULT_CODE_RANGE
+VM_FAULT_DATA_RANGE
+VM_FAULT_NULL_ADDRESS
+VM_FAULT_INVALID_SIZE
+VM_FAULT_INVALID_OPCODE
+VM_FAULT_ARITHMETIC
+VM_FAULT_BAD_STATE
+```
+
+运行时规则：
+
+- 所有 code 字节读取在推进 IP 前验证剩余长度；
+- VM 内部 data 读写统一使用 offset + size 边界检查；
+- data 段内的绝对地址自动转回受检 offset；
+- branch/switch 目标必须落在 code 段内；
+- switch 的 case 数必须小于等于剩余字节可容纳数量，防止篡改计数造成长循环；
+- opcode 解码设置尝试上限；
+- 除零、越界移位、非法宽度和无效 opcode 设置 fault；
+- 返回后保留返回值槽并清零其余 data 段；
+- 首个 fault 触发 `__builtin_trap()` fail-closed。
+
+辅助边界函数被强制内联。CI 会把 C 源编译为 Windows x64 bitcode，检查 `vm_interpreter` 不再调用未被克隆的内部 helper。
+
+该边界只能完整覆盖 VM 自有 code/data 段。非空外部原始指针没有可移植的对象长度元数据，因此只能做空地址检查，不能承诺防止所有调用方指针错误。
+
+### 5.6 嵌入产物与可执行测试
+
+仓库中的 `aVMPInterpreter/aVMPInterpreter.bc` 已由最新解释器 C 源重新生成，`llvm/include/llvm/Transforms/Obfuscation/vm.h` 由 bitcode 的原始字节生成。
+
+`tools/check-vmp-embed.py` 检查：
+
+- LLVM bitcode magic；
+- `binary_ir_length` 与文件长度；
+- `binary_ir_data` 与 `.bc` 逐字节一致；
+- include guard；
+- SHA-256 摘要。
+
+`tools/vmp-interpreter-bounds-smoke.c` 原生执行并验证：
+
+- 正常 VM data 读写；
+- code/data 越界；
+- 空地址和非法宽度；
+- 篡改的 switch case 数；
+- 非法 branch 目标；
+- 返回后临时 data 清理；
+- 解释器坏状态。
+
+`tools/vmp-compatibility-smoke.cpp` 使用 LLVM AsmParser 解析真实 IR，验证允许、拒绝和资源超限场景。CI 还会分别编译 `VMPCompatibility.cpp` 和集成后的 `aVMP.cpp`。
+
+需要明确：运行时边界和兼容性预检不能替代 VMP 字节码认证。现有字节流仍无密码学篡改标签。
 
 ## 6. 环境诊断
 
@@ -281,11 +335,14 @@ python3 tools/allvm-doctor.py --json
 
 `.github/workflows/hardening-smoke.yml` 用于：
 
-- 编译检查 `tools/allvm-doctor.py` 和 `tools/check-hardening.py`；
+- 编译检查 `tools/allvm-doctor.py`、`tools/check-hardening.py` 和 `tools/check-vmp-embed.py`；
 - 验证 doctor 的 `--help` 入口；
 - 编译并运行 `SecureRandom.h` 的最小 C++17 烟雾测试；
 - 使用同一套 LLVM 头文件分别编译 `VMPCompatibility.cpp` 和 `aVMP.cpp`；
 - 构建并运行解析真实 IR 的 VMP 兼容性行为测试；
+- 原生编译并执行 VMP 解释器 code/data/fault 边界测试；
+- 临时生成 Windows x64 bitcode，检查 helper 内联、fault/size 全局和 `llvm.trap`；
+- 检查仓库 `.bc` 与 `vm.h` 逐字节一致；
 - 检查安全随机头文件包含 Windows 与 POSIX 路径；
 - 阻止常量保护、`CryptoUtils` 和旧版 VMP 重新引入弱随机调用；
 - 检查构建助手保持“默认不修改 NDK”；

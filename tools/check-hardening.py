@@ -55,6 +55,11 @@ def static_checks(results: list[Result]) -> None:
     vmp_header = read("llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h")
     vmp_preflight = read("llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp")
     vmp_smoke = read("tools/vmp-compatibility-smoke.cpp")
+    interpreter_header = read("aVMPInterpreter/aVMPInterpreter.h")
+    interpreter_source = read("aVMPInterpreter/aVMPInterpreter.c")
+    interpreter_smoke = read("tools/vmp-interpreter-bounds-smoke.c")
+    embed_checker = read("tools/check-vmp-embed.py")
+    embedded_header = read("llvm/include/llvm/Transforms/Obfuscation/vm.h")
     build_helper = read("build.cpp")
     readme = read("README.md")
     hardening_doc = read("docs/ALLVM_HARDENING.md")
@@ -239,6 +244,145 @@ def static_checks(results: list[Result]) -> None:
         else "缺少: " + ", ".join(missing),
     )
 
+
+    interpreter_header_markers = (
+        "ALLVM_AVMP_INTERPRETER_H",
+        "VM_FAULT_CODE_RANGE",
+        "VM_FAULT_DATA_RANGE",
+        "VM_FAULT_INVALID_OPCODE",
+        "VM_FAULT_BAD_STATE",
+        "extern uint64_t code_seg_size",
+        "extern uint64_t data_seg_size",
+        "extern uint32_t vm_fault",
+    )
+    ok, missing = contains_all(interpreter_header, interpreter_header_markers)
+    add(
+        results,
+        "VMP 运行时故障 ABI",
+        ok,
+        "段长度、首故障状态和 include guard 已定义"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    interpreter_source_markers = (
+        "VM_FORCE_INLINE static __inline__",
+        "vm_range_valid",
+        "vm_fail_closed",
+        "vm_set_ip",
+        "remaining_code / bytes_per_case",
+        "VM_FAULT_ARITHMETIC",
+        "data_seg_clean((int)var_size)",
+        "code_seg_size < 8",
+        "pointer_size != 8",
+    )
+    ok, missing = contains_all(interpreter_source, interpreter_source_markers)
+    add(
+        results,
+        "VMP 解释器段边界",
+        ok,
+        "代码/数据边界、跳转、switch 预算和 fail-closed 路径存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    unsafe_interpreter_markers = [
+        marker
+        for marker in ("#define SEG_SIZE", "pack_store_addr(data_seg_addr")
+        if marker in interpreter_source
+    ]
+    add(
+        results,
+        "VMP 解释器固定段回归",
+        not unsafe_interpreter_markers,
+        "未发现固定 5000 字节段或绕过内部数据边界的写入"
+        if not unsafe_interpreter_markers
+        else "仍存在: " + ", ".join(unsafe_interpreter_markers),
+    )
+
+    runtime_mapping_markers = (
+        "getCodeSegmentSize",
+        "getDataSegmentSize",
+        "code_seg_size_gv",
+        "data_seg_size_gv",
+        "vm_fault_gv",
+        '"code_seg_size", "data_seg_size", "vm_fault"',
+        "vm_fault_gv->setThreadLocal(true)",
+    )
+    ok, missing = contains_all(avmp, runtime_mapping_markers)
+    add(
+        results,
+        "VMP 运行时元数据接入",
+        ok,
+        "实际段长度和 TLS fault 已映射到嵌入解释器"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    abi_64_ok = "仅支持 64 位目标" in vmp_preflight and "PointerSize != 8" in vmp_preflight
+    add(
+        results,
+        "VMP 64 位 ABI 限制",
+        abi_64_ok,
+        "当前嵌入解释器只放行 64 位目标"
+        if abi_64_ok
+        else "64 位目标限制缺失",
+    )
+
+    interpreter_smoke_markers = (
+        "test_valid_data_access",
+        "test_data_out_of_bounds",
+        "test_code_out_of_bounds",
+        "test_invalid_width_and_null",
+        "test_tampered_switch_case_count",
+        "test_invalid_branch_target",
+        "test_return_clears_transient_data",
+        "test_bad_interpreter_state",
+        "VMP_TEST_NO_TRAP",
+    )
+    ok, missing = contains_all(interpreter_smoke, interpreter_smoke_markers)
+    add(
+        results,
+        "VMP 原生边界测试",
+        ok,
+        "段越界、篡改 switch、跳转、清理和坏状态场景存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    embed_checker_markers = (
+        'bitcode.startswith(b"BC\\xc0\\xde")',
+        "embedded == bitcode",
+        "binary_ir_length",
+        "ALLVM_EMBEDDED_VMP_IR_H",
+        "hashlib.sha256",
+    )
+    ok, missing = contains_all(embed_checker, embed_checker_markers)
+    add(
+        results,
+        "VMP 嵌入产物检查器",
+        ok,
+        "bitcode magic、长度、逐字节一致性和摘要检查存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    embedded_header_markers = (
+        "ALLVM_EMBEDDED_VMP_IR_H",
+        "binary_ir_length",
+        "binary_ir_data",
+        "get_binary_ir",
+    )
+    ok, missing = contains_all(embedded_header, embedded_header_markers)
+    add(
+        results,
+        "VMP 嵌入头结构",
+        ok,
+        "带 include guard 的嵌入头已生成"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
     required_secure = (
         "BCryptGenRandom",
         "BCRYPT_USE_SYSTEM_PREFERRED_RNG",
@@ -347,6 +491,9 @@ def static_checks(results: list[Result]) -> None:
         "VMP 兼容性预检",
         "-irobf-vmp-strict",
         "-irobf-vmp-max-code-bytes",
+        "运行时段边界与 fail-closed",
+        "当前嵌入解释器仅支持 64 位目标",
+        "check-vmp-embed.py",
         "后续路线",
     )
     ok, missing = contains_all(readme, readme_markers)
@@ -365,6 +512,9 @@ def static_checks(results: list[Result]) -> None:
         "旧版 VMP 随机化",
         "VMP 兼容性预检",
         "VMPResourceLimits",
+        "运行时段边界与 fail-closed",
+        "VM_FAULT_CODE_RANGE",
+        "check-vmp-embed.py",
         "构建助手",
         "验收标准",
         "仍需完成的高优先级改造",
@@ -384,6 +534,7 @@ def validate_python(results: list[Result]) -> None:
     targets = [
         ROOT / "tools" / "allvm-doctor.py",
         ROOT / "tools" / "check-hardening.py",
+        ROOT / "tools" / "check-vmp-embed.py",
     ]
     try:
         for target in targets:
@@ -391,7 +542,12 @@ def validate_python(results: list[Result]) -> None:
     except py_compile.PyCompileError as exc:
         add(results, "Python 工具语法", False, str(exc))
         return
-    add(results, "Python 工具语法", True, "doctor 与检查器均通过 py_compile")
+    add(
+        results,
+        "Python 工具语法",
+        True,
+        "doctor、加固检查器和 VMP 嵌入检查器均通过 py_compile",
+    )
 
 
 def compile_secure_random_header(results: list[Result], required: bool) -> None:

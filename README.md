@@ -24,6 +24,8 @@
 - 字符串保护按模块派生随机序列，使用无偏长度选择，并清理编译期临时密钥缓冲；
 - 旧版 VMP 不再使用 `srand(time(0))` 和 `rand()` 生成种子；
 - 新增 VMP 兼容性预检、可配置资源阈值、严格失败模式、实际容量检查与 IR verifier；
+- VMP 解释器加入 code/data 段长度、TLS fault 状态、跳转/switch 边界、fail-closed 和返回后临时数据清理；
+- 重新生成嵌入 bitcode，并用 `tools/check-vmp-embed.py` 校验 `.bc` 与 `vm.h` 逐字节一致；
 - 修复常量保护 Pass 对 PHI incoming value 的处理和空工作集判断；
 - 新增 `tools/allvm-doctor.py`，可诊断 NDK、构建工具和 16 KiB ELF 对齐；
 - 新增 GitHub Actions 烟雾检查，防止弱随机路径回归；
@@ -37,7 +39,7 @@
 |---|---|---|
 | 常量整数/浮点保护 | 使用构建级安全随机根并按 Pass 分离 | 主要用于隐藏和增加分析成本，不等同于服务端秘密管理 |
 | 字符串保护 | 按模块分离随机域、无偏选择密钥长度，并清理编译期临时缓冲 | 现有记录格式仍是自定义可逆变换，密钥与密文同驻二进制，尚无标准 AEAD 完整性标签 |
-| 旧版 VMP | 按模块和函数派生种子；转换前检查 IR/ABI/资源；运行状态使用 TLS；转换后运行 IR verifier | 字节码仍使用 xorshift 可逆流且没有认证标签；互递归和间接递归仍不能完全静态证明安全 |
+| 旧版 VMP | 按模块和函数派生种子；转换前检查 IR/ABI/资源；运行时检查 code/data 段与跳转边界；TLS fault fail-closed；转换后运行 IR verifier | 当前嵌入解释器仅支持 64 位目标；外部原始指针仍无法获知对象长度；字节码仍使用 xorshift 且没有认证标签 |
 | 控制流平坦化 | 改变基本块调度结构 | 可能增加体积、寄存器压力和编译时间 |
 | 间接调用/跳转 | 隐藏直接调用与分支关系 | 对异常、内联汇编和特殊控制流需充分回归 |
 | Syscall Protect | ARM64 下将部分 libc 调用替换为直接系统调用 | 与 Android 版本、ABI 和 seccomp 策略相关，不适合无条件全开 |
@@ -302,7 +304,7 @@ int VMP_PROTECT verify_license(const char *token, int length) {
 
 数值限制设为 `0` 表示关闭对应阈值，但通常不建议在不受信任或自动生成的 IR 上这样做。
 
-当前预检允许的核心子集包括：不超过 64 位的整数、普通地址空间指针、`float/double`、简单 `alloca/load/store`、受支持算术、无符号整数比较、简单 GEP、C 调用约定下的普通调用、`br/switch/ret`。结构体 GEP 使用 LLVM `StructLayout` 计算真实 padding 后偏移。
+当前嵌入解释器仅支持 **64 位目标**。预检允许的核心子集包括：不超过 64 位的整数、普通地址空间指针、`float/double`、简单 `alloca/load/store`、受支持算术、无符号整数比较、简单 GEP、C 调用约定下的普通调用、`br/switch/ret`。结构体 GEP 使用 LLVM `StructLayout` 计算真实 padding 后偏移。32 位目标会在预检阶段明确跳过或在严格模式下报错。
 
 以下构造会在转换前被拒绝并给出原因：
 
@@ -318,7 +320,44 @@ int VMP_PROTECT verify_license(const char *token, int length) {
 
 每个受保护函数的可变运行状态被放入线程局部存储，改善不同线程同时调用的隔离性。**直接递归会被拒绝**；互递归和间接递归仍无法完全静态识别，应避免用于 VMP 函数。VM 内部栈和调用栈的完整动态预算仍属于后续工作。
 
-需要明确：xorshift 字节流仍只是可逆混淆，不是 AEAD，修改 VM 字节码也尚无统一认证标签。预检解决的是语义兼容性、资源失控和静默错误，不等于密码学完整性保护。
+
+#### 运行时段边界与 fail-closed
+
+转换器会把每个函数的实际 `code_seg_size` 和 `data_seg_size` 写入嵌入解释器，并为可变故障状态创建线程局部 `vm_fault`。解释器保留首次故障码，后续操作不会覆盖根因。
+
+当前故障类型包括：
+
+```text
+VM_FAULT_CODE_RANGE
+VM_FAULT_DATA_RANGE
+VM_FAULT_NULL_ADDRESS
+VM_FAULT_INVALID_SIZE
+VM_FAULT_INVALID_OPCODE
+VM_FAULT_ARITHMETIC
+VM_FAULT_BAD_STATE
+```
+
+运行时会检查：
+
+- opcode、种子、立即数和 switch 表不能越过 code 段；
+- VM 内部 data 段读写不能越界；
+- branch/switch 目标必须落在有效 code 段内；
+- switch case 数不能超过剩余字节实际可容纳的数量；
+- 访问空地址、非法值宽度、除零、越界移位和无效 opcode 会设置 fault；
+- 返回时保留返回值槽，并清零其余 VM data 段；
+- 状态或字节码损坏时通过 `__builtin_trap()` fail-closed，而不是继续解释不可信数据。
+
+边界检查只能够完整覆盖 **VM 自己拥有的 code/data 段**。对于原始程序传入的外部指针，解释器能够拒绝空地址，但本地二进制没有通用、可靠的方法获知该指针对应对象的真实长度；错误的非空外部指针仍可能触发目标程序本身的内存错误。因此预检、调用方契约和 ASan/设备测试仍然必要。
+
+仓库中的 `aVMPInterpreter.bc` 已由最新 C 源重新生成，`vm.h` 由 bitcode 原始字节产生。运行：
+
+```bash
+python3 tools/check-vmp-embed.py
+```
+
+可验证 bitcode magic、声明长度、逐字节一致性、include guard 和 SHA-256 摘要。
+
+需要明确：xorshift 字节流仍只是可逆混淆，不是 AEAD，修改 VM 字节码也尚无统一认证标签。预检和运行时边界解决的是语义兼容性、资源失控、越界和静默错误，不等于密码学完整性保护。
 
 ## 参数速查
 
@@ -449,6 +488,9 @@ llvm-readelf -lW protected.so
 | `llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp` | 整数常量保护 |
 | `llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp` | 浮点常量保护 |
 | `llvm/lib/Transforms/Obfuscation/StringEncryption.cpp` | 字符串保护 |
+| `aVMPInterpreter/aVMPInterpreter.c` | 带 code/data 边界和 fail-closed fault 的嵌入解释器源码 |
+| `aVMPInterpreter/aVMPInterpreter.bc` | 由解释器 C 源生成的嵌入 bitcode |
+| `llvm/include/llvm/Transforms/Obfuscation/vm.h` | bitcode 的逐字节 C++ 嵌入头 |
 | `llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h` | VMP 预检结果和资源限制接口 |
 | `llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp` | VMP IR/ABI/资源兼容性分析 |
 | `llvm/lib/Transforms/Obfuscation/aVMP.cpp` | 旧版 VMP 翻译器及预检接入 |
@@ -457,6 +499,8 @@ llvm-readelf -lW protected.so
 | `tools/allvm-doctor.py` | 环境和 ELF 诊断工具 |
 | `tools/check-hardening.py` | 弱随机、VMP 预检、文档和安全默认值回归检查 |
 | `tools/vmp-compatibility-smoke.cpp` | 解析真实 IR 的 VMP 兼容性行为测试 |
+| `tools/vmp-interpreter-bounds-smoke.c` | 原生执行 VMP 段边界和 fault 行为测试 |
+| `tools/check-vmp-embed.py` | 检查 `.bc` 与 `vm.h` 逐字节一致 |
 | `.github/workflows/hardening-smoke.yml` | 加固回归烟雾检查 |
 
 ## 新增 Pass 的基本步骤

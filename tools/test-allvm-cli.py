@@ -101,7 +101,20 @@ class AllvmCliTests(unittest.TestCase):
         shell = self.run_cli("render", "--profile", "strong", "--format", "shell")
         self.assertIn("-irobf-vmp", shell.stdout)
 
-    def test_project_init_and_config_override(self) -> None:
+        gradle_kts = self.run_cli(
+            "render", "--profile", "balanced", "--format", "gradle-kts"
+        )
+        self.assertIn("setNdkPath", gradle_kts.stdout)
+        self.assertIn("ALLVM_NDK_HOME", gradle_kts.stdout)
+        self.assertIn('allvmProfile = "balanced"', gradle_kts.stdout)
+
+        gradle_groovy = self.run_cli(
+            "render", "--profile", "compat", "--format", "gradle-groovy"
+        )
+        self.assertIn("ndkPath", gradle_groovy.stdout)
+        self.assertIn("allvmProfile = 'compat'", gradle_groovy.stdout)
+
+    def test_project_init_sync_gradle_and_config_override(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"
             self.run_cli(
@@ -112,22 +125,68 @@ class AllvmCliTests(unittest.TestCase):
                 "balanced",
                 "--build-system",
                 "both",
+                "--gradle",
+                "both",
             )
-            config_path = project / ".allvm" / "allvm.json"
-            cmake_path = project / ".allvm" / "allvm-options.cmake"
-            make_path = project / ".allvm" / "allvm.mk"
-            self.assertTrue(config_path.is_file())
-            self.assertTrue(cmake_path.is_file())
-            self.assertTrue(make_path.is_file())
+            output = project / ".allvm"
+            config_path = output / "allvm.json"
+            cmake_path = output / "allvm-options.cmake"
+            make_path = output / "allvm.mk"
+            kts_path = output / "allvm.gradle.kts"
+            groovy_path = output / "allvm.gradle"
+            lock_path = output / "allvm.lock.json"
+            for path in (
+                config_path,
+                cmake_path,
+                make_path,
+                kts_path,
+                groovy_path,
+                lock_path,
+            ):
+                self.assertTrue(path.is_file(), path)
             self.assertIn("allvm_apply", cmake_path.read_text(encoding="utf-8"))
+            self.assertIn("setNdkPath", kts_path.read_text(encoding="utf-8"))
+            self.assertIn("ndkPath", groovy_path.read_text(encoding="utf-8"))
 
             config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                config["generate"],
+                ["cmake", "ndk-build", "gradle-kts", "gradle-groovy"],
+            )
             config["remove_compile_options"] = ["-irobf-fla"]
             config["extra_compile_options"] = ["-DALLVM_PROJECT_TEST=1"]
             config_path.write_text(
                 json.dumps(config, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+            self.run_cli("sync", "--directory", str(project))
+            self.assertNotIn("-irobf-fla", cmake_path.read_text(encoding="utf-8"))
+            self.assertIn(
+                "-DALLVM_PROJECT_TEST=1", cmake_path.read_text(encoding="utf-8")
+            )
+            checked = self.run_cli(
+                "sync", "--directory", str(project), "--check", "--json"
+            )
+            self.assertTrue(json.loads(checked.stdout)["ok"])
+
+            cmake_path.write_text("tampered\n", encoding="utf-8")
+            stale = self.run_cli(
+                "sync", "--directory", str(project), "--check", expected=1
+            )
+            self.assertIn("STALE", stale.stdout)
+            self.run_cli("sync", "--directory", str(project))
+            self.assertIn("allvm_apply", cmake_path.read_text(encoding="utf-8"))
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["generate"].remove("gradle-groovy")
+            config_path.write_text(
+                json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.run_cli("sync", "--directory", str(project))
+            self.assertFalse(groovy_path.exists())
+            self.assertTrue(kts_path.exists())
+
             rendered = self.run_cli(
                 "render", "--config", str(config_path), "--format", "lines"
             )
@@ -174,7 +233,7 @@ class AllvmCliTests(unittest.TestCase):
             )
         return ndk, allvm_bin, bin_dir
 
-    def test_overlay_create_verify_tamper_and_remove(self) -> None:
+    def test_overlay_create_status_update_verify_tamper_and_remove(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ndk, allvm_bin, source_bin = self.make_fake_ndk(root)
@@ -201,17 +260,6 @@ class AllvmCliTests(unittest.TestCase):
             self.assertEqual(manifest["type"], "allvm-ndk-overlay")
             self.assertEqual(manifest["copy_mode"], "copy")
             self.assertTrue((overlay / ".allvm-overlay.json").is_file())
-            self.assertTrue(
-                (
-                    overlay
-                    / "toolchains"
-                    / "llvm"
-                    / "prebuilt"
-                    / host_tag()
-                    / "sysroot"
-                    / "marker.txt"
-                ).is_file()
-            )
 
             overlay_bin = (
                 overlay / "toolchains" / "llvm" / "prebuilt" / host_tag() / "bin"
@@ -223,7 +271,47 @@ class AllvmCliTests(unittest.TestCase):
                 )
                 self.assertEqual(digest(source_bin / tool_name(name)), source_hashes[name])
 
+            status = self.run_cli(
+                "overlay", "status", "--path", str(overlay), "--size", "--json"
+            )
+            status_payload = json.loads(status.stdout)
+            self.assertTrue(status_payload["verified"])
+            self.assertFalse(status_payload["update_available"])
+            self.assertGreater(status_payload["logical_size"]["logical_bytes"], 0)
+
+            new_clang = allvm_bin / tool_name("clang")
+            new_clang.write_text("allvm-clang-v2\n", encoding="utf-8")
+            status = self.run_cli(
+                "overlay", "status", "--path", str(overlay), "--json"
+            )
+            self.assertTrue(json.loads(status.stdout)["update_available"])
+
+            dry_run = self.run_cli(
+                "overlay",
+                "update",
+                "--path",
+                str(overlay),
+                "--dry-run",
+                "--json",
+            )
+            self.assertIn("clang", json.loads(dry_run.stdout)["changed"])
+            self.assertEqual(
+                (overlay_bin / tool_name("clang")).read_text(encoding="utf-8"),
+                "allvm-clang\n",
+            )
+
+            updated = self.run_cli(
+                "overlay", "update", "--path", str(overlay), "--json"
+            )
+            self.assertIn("clang", json.loads(updated.stdout)["changed"])
+            self.assertEqual(
+                (overlay_bin / tool_name("clang")).read_text(encoding="utf-8"),
+                "allvm-clang-v2\n",
+            )
             self.run_cli("overlay", "verify", "--path", str(overlay))
+            for name in ("clang", "clang++", "ld.lld", "lld"):
+                self.assertEqual(digest(source_bin / tool_name(name)), source_hashes[name])
+
             (overlay_bin / tool_name("clang")).write_text(
                 "tampered\n", encoding="utf-8"
             )

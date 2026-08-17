@@ -5,7 +5,7 @@
 - **当前维护分支**：<https://github.com/Forever-Yf/ALLVM>
 - **上游项目**：<https://github.com/abcdefgjh-li/ALLVM>
 - **当前加固 PR**：`hardening/p0-secure-seeding-doctor`
-- **当前易用性分支**：`usability/p1-cli-presets-overlay`
+- **当前易用性分支**：`usability/p2-sync-gradle-overlay-status`
 - **中文 CLI 指南**：[`docs/ALLVM_USAGE_CN.md`](docs/ALLVM_USAGE_CN.md)
 
 > [!IMPORTANT]
@@ -45,9 +45,10 @@
 allvm
 ├── doctor       环境与 16 KiB ELF 诊断
 ├── profile      查看 compat / balanced / strong 预设
-├── render       生成 CMake、ndk-build、shell、JSON 或响应文件参数
+├── render       生成 CMake、ndk-build、Gradle、shell、JSON 或响应文件参数
 ├── init         在项目内生成 .allvm 配置与接入片段
-└── overlay      创建、校验和删除不修改源 NDK 的独立副本
+├── sync         从 allvm.json 原子刷新全部生成文件并维护 lock
+└── overlay      创建、状态、增量更新、校验和删除独立 NDK
 ```
 
 仓库根目录入口：
@@ -72,7 +73,8 @@ Windows：
 python3 /path/to/ALLVM/allvm.py init \
   --directory . \
   --profile balanced \
-  --build-system both
+  --build-system both \
+  --gradle both
 
 # 2. 创建完整、独立的 NDK 副本，并只在副本中安装 ALLVM 编译器
 python3 /path/to/ALLVM/allvm.py overlay create \
@@ -80,9 +82,14 @@ python3 /path/to/ALLVM/allvm.py overlay create \
   --allvm-bin /path/to/ALLVM/build-windows/bin \
   --output ~/.allvm/ndk/r29-allvm
 
-# 3. 验证副本工具哈希和源 NDK 未发生变化
-python3 /path/to/ALLVM/allvm.py overlay verify \
-  --path ~/.allvm/ndk/r29-allvm
+# 3. 查看校验、更新可用性和逻辑大小
+python3 /path/to/ALLVM/allvm.py overlay status \
+  --path ~/.allvm/ndk/r29-allvm \
+  --size
+
+# 4. 修改 allvm.json 后统一刷新，并在 CI 检查生成文件未过期
+python3 /path/to/ALLVM/allvm.py sync --directory .
+python3 /path/to/ALLVM/allvm.py sync --directory . --check
 ```
 
 Linux 的 `overlay create --mode auto` 优先请求写时复制，不支持时安全退回普通复制；Windows 和 macOS 使用完整复制。工具不会创建硬链接镜像，也不会直接覆盖源 NDK。完整说明见 [`docs/ALLVM_USAGE_CN.md`](docs/ALLVM_USAGE_CN.md)。
@@ -157,7 +164,7 @@ python3 allvm.py doctor \
 ```bash
 git clone https://github.com/Forever-Yf/ALLVM.git
 cd ALLVM
-git switch usability/p1-cli-presets-overlay
+git switch usability/p2-sync-gradle-overlay-status
 ```
 
 ### 2. 编译工具链
@@ -273,16 +280,19 @@ $env:ALLVM_BUILD_SEED = "9f3d0f0f2a37d64e7adbb5bf402f8de02ecdf73334edb81beeaaf9d
 python3 allvm.py profile list
 python3 allvm.py render --profile compat --format cmake
 python3 allvm.py render --profile balanced --format ndk-build
+python3 allvm.py render --profile balanced --format gradle-kts
 python3 allvm.py render --profile strong --format json
 ```
 
-`init` 会生成：
+`init` 会生成；之后只编辑 `allvm.json`，再运行 `allvm sync`：
 
 ```text
 .allvm/
 ├── allvm.json
 ├── allvm-options.cmake
 ├── allvm.mk
+├── allvm.gradle.kts / allvm.gradle（按 --gradle 选择）
+├── allvm.lock.json
 └── README.md
 ```
 

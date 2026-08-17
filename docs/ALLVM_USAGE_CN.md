@@ -6,9 +6,10 @@
 allvm
 ├── doctor            环境与 ELF 诊断
 ├── profile           查看兼容、平衡和高强度预设
-├── render            输出 shell/CMake/ndk-build/JSON/响应文件参数
+├── render            输出 shell/CMake/ndk-build/Gradle/JSON/响应文件参数
 ├── init              在项目中生成 .allvm 配置和接入片段
-└── overlay           创建、校验和删除独立 NDK 副本
+├── sync              原子刷新生成文件、维护 lock、CI 检查过期
+└── overlay           创建、状态、增量更新、校验和删除独立 NDK
 ```
 
 CLI 只使用 Python 标准库，最低支持 Python 3.9。它不会直接修改源 Android NDK。
@@ -185,7 +186,27 @@ python3 allvm.py overlay create ... --mode reflink
 python3 allvm.py overlay verify --path ~/.allvm/ndk/r29-allvm
 ```
 
-查看 manifest：
+查看综合状态和可选逻辑大小：
+
+```bash
+python3 allvm.py overlay status \
+  --path ~/.allvm/ndk/r29-allvm \
+  --size
+```
+
+重新编译 ALLVM 主机工具后，无需复制整个 NDK，只更新副本中的工具：
+
+```bash
+python3 allvm.py overlay update \
+  --path ~/.allvm/ndk/r29-allvm \
+  --allvm-bin /path/to/new/allvm/bin \
+  --dry-run
+python3 allvm.py overlay update \
+  --path ~/.allvm/ndk/r29-allvm \
+  --allvm-bin /path/to/new/allvm/bin
+```
+
+`update` 会先验证源 NDK 哈希；源工具发生变化时拒绝更新。省略 `--allvm-bin` 时使用 manifest 中记录的目录。查看原始 manifest：
 
 ```bash
 python3 allvm.py overlay info --path ~/.allvm/ndk/r29-allvm
@@ -237,7 +258,8 @@ ndk.dir=D\:\\Android\\ALLVM\\ndk-29
 python3 /path/to/ALLVM/allvm.py init \
   --directory . \
   --profile balanced \
-  --build-system both
+  --build-system both \
+  --gradle both
 ```
 
 生成：
@@ -247,6 +269,9 @@ python3 /path/to/ALLVM/allvm.py init \
 ├── allvm.json
 ├── allvm-options.cmake
 ├── allvm.mk
+├── allvm.gradle.kts
+├── allvm.gradle
+├── allvm.lock.json
 └── README.md
 ```
 
@@ -256,7 +281,14 @@ python3 /path/to/ALLVM/allvm.py init \
 python3 allvm.py init --directory . --profile compat --force
 ```
 
-`--force` 只刷新 `.allvm` 中的生成文件，不会修改项目其他文件。
+`--force` 只初始化 `.allvm`，不会修改项目其他文件。日常修改只编辑 `allvm.json`，然后运行：
+
+```bash
+python3 allvm.py sync --directory .
+python3 allvm.py sync --directory . --check
+```
+
+`sync` 原子刷新选择的生成文件和 `allvm.lock.json`。`--check` 不写文件，缺失、过期或存在可安全删除的旧生成文件时返回 1，适合 CI。切换 `generate` 后，未修改的旧生成文件会自动删除；用户改过的旧生成文件会保留并报错。
 
 ## 3. CMake 接入
 
@@ -332,28 +364,47 @@ python3 allvm.py render --profile strong --format ndk-build
 
 ## 5. Gradle/Android Studio 接入
 
-CLI 不直接改写 `build.gradle` 或 `build.gradle.kts`，避免破坏不同 AGP 版本和项目结构。推荐让 Gradle 继续调用 CMake 或 ndk-build：
+CLI 不直接改写 `build.gradle` 或 `build.gradle.kts`。初始化时使用：
 
-```kotlin
-android {
-    defaultConfig {
-        externalNativeBuild {
-            cmake {
-                // ALLVM 参数由 CMakeLists.txt 中的 allvm_apply() 管理
-            }
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-        }
-    }
-}
+```bash
+python3 allvm.py init \
+  --directory . \
+  --profile balanced \
+  --build-system cmake \
+  --gradle both
 ```
 
-然后在 `CMakeLists.txt` 中 include `.allvm/allvm-options.cmake`。这样 Android Studio、命令行 Gradle 和 CI 使用同一份配置。
+Kotlin DSL 模块在 plugins 块之后加入：
 
+```kotlin
+apply(from = rootProject.file(".allvm/allvm.gradle.kts"))
+```
+
+Groovy DSL：
+
+```groovy
+apply from: rootProject.file('.allvm/allvm.gradle')
+```
+
+生成片段按顺序读取：
+
+```text
+-Pallvm.ndkPath
+ALLVM_NDK_HOME
+ANDROID_NDK_HOME
+ANDROID_NDK_ROOT
+```
+
+找到路径后设置 Android Gradle Plugin 的 `ndkPath`。个人绝对路径不会写进仓库；保护参数仍由 `allvm-options.cmake` 或 `allvm.mk` 管理。Gradle 原生构建继续使用模块已有的 `externalNativeBuild.cmake` 或 `externalNativeBuild.ndkBuild` 配置。
+
+也可单独渲染：
+
+```bash
+python3 allvm.py render --profile balanced --format gradle-kts
+python3 allvm.py render --profile balanced --format gradle-groovy
+```
+
+## 6. 参数渲染格式
 ## 6. 参数渲染格式
 
 ```bash
@@ -365,6 +416,8 @@ python3 allvm.py render --profile balanced --format FORMAT
 | `json` | 工具集成、审计和 CI |
 | `cmake` | 可 include 的 CMake 文件 |
 | `ndk-build` | 可 include 的 Android.mk 片段 |
+| `gradle-kts` | 可 apply 的 Kotlin DSL NDK 选择片段 |
+| `gradle-groovy` | 可 apply 的 Groovy DSL NDK 选择片段 |
 | `shell` | POSIX shell 参数 |
 | `powershell` | PowerShell 参数 |
 | `rsp` | 一行一个参数的响应文件 |
@@ -398,6 +451,7 @@ python3 allvm.py render \
 {
   "schema": 1,
   "profile": "balanced",
+  "generate": ["cmake", "ndk-build", "gradle-kts"],
   "extra_compile_options": [],
   "remove_compile_options": [],
   "extra_cxx_options": [],
@@ -491,7 +545,9 @@ bool verify_license(const unsigned char *data, unsigned long size) {
 
 ```bash
 python3 allvm.py profile list
+python3 allvm.py sync --directory . --check
 python3 allvm.py render --profile balanced --format json > allvm-flags.json
+python3 allvm.py overlay status --path "$ANDROID_NDK_HOME" --json
 python3 allvm.py overlay verify --path "$ANDROID_NDK_HOME"
 python3 allvm.py doctor --ndk "$ANDROID_NDK_HOME"
 ```

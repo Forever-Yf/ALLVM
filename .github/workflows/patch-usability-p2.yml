@@ -1,0 +1,67 @@
+name: Apply usability phase 2 migration
+
+on:
+  push:
+    branches:
+      - usability/p2-sync-gradle-overlay-status
+    paths:
+      - .github/workflows/patch-usability-p2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            README.md
+            configs/profiles
+            docs/ALLVM_USAGE_CN.md
+            tools/allvm.py
+            tools/allvm-doctor.py
+            tools/test-allvm-cli.py
+            tools/apply-usability-p2.py
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Apply migration and run full standard-library regression
+        run: |
+          python -m py_compile tools/apply-usability-p2.py
+          python tools/apply-usability-p2.py
+          python -m py_compile tools/allvm.py tools/test-allvm-cli.py
+          python tools/test-allvm-cli.py
+
+      - name: Exercise sync check and Gradle render directly
+        run: |
+          tmp_project="$(mktemp -d)"
+          python tools/allvm.py init \
+            --directory "$tmp_project" \
+            --profile balanced \
+            --build-system both \
+            --gradle both
+          python tools/allvm.py sync --directory "$tmp_project" --check
+          python tools/allvm.py render --profile compat --format gradle-kts \
+            | grep -q 'setNdkPath'
+          python tools/allvm.py render --profile compat --format gradle-groovy \
+            | grep -q 'ndkPath'
+
+      - name: Commit validated implementation
+        run: |
+          git rm tools/apply-usability-p2.py
+          git add \
+            README.md \
+            docs/ALLVM_USAGE_CN.md \
+            tools/allvm.py \
+            tools/test-allvm-cli.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "add project sync Gradle helpers and overlay lifecycle"
+          git push origin HEAD:usability/p2-sync-gradle-overlay-status

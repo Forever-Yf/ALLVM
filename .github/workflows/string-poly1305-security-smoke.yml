@@ -3,6 +3,8 @@ name: ChaCha20-Poly1305 string security checks
 on:
   pull_request:
     paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringIR.h"
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringPoly1305Crypto.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp"
@@ -18,6 +20,8 @@ on:
     branches:
       - "security/p4-chacha20-poly1305-strings"
     paths:
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringCrypto.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringIR.h"
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedStringPoly1305Crypto.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedStringPoly1305IR.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryptionPoly1305.cpp"

@@ -16,7 +16,7 @@
 本阶段不宣称解决：
 
 - 客户端长期密钥不可提取；
-- 字符串和 VMP 字节码的认证加密；
+- 字符串记录的标准 AEAD，以及客户端认证密钥不可提取；
 - 运行时内存中的明文绝对不可观察；
 - 对所有 LLVM IR 构造、ABI 和 Android ROM 的兼容；
 - 自定义 ELF 装载器的全部边界检查和 16 KiB 页适配。
@@ -42,7 +42,8 @@ BuildSeed（32 字节）
 ├── constant-int
 ├── constant-fp
 ├── string-encryption | ModuleIdentifier
-└── legacy-vmp | ModuleIdentifier | FunctionName
+├── legacy-vmp-layout | ModuleIdentifier | FunctionName
+└── legacy-vmp-integrity | ModuleIdentifier | FunctionName
 ```
 
 这样可以避免整数常量、浮点常量和不同 VMP 函数之间意外复用随机序列。
@@ -149,10 +150,11 @@ xorshift32_seed ^= rand();
 同一秒内的构建容易产生相关种子，也难以在不同函数之间建立稳定隔离。现在每个翻译器按以下域派生独立 `CryptoUtils`：
 
 ```text
-legacy-vmp | ModuleIdentifier | FunctionName
+legacy-vmp-layout | ModuleIdentifier | FunctionName
+legacy-vmp-integrity | ModuleIdentifier | FunctionName
 ```
 
-随后取得非零 32 位种子，保证 xorshift 状态不会以零启动。该改动只改善种子质量和隔离；xorshift 仍是可逆混淆，不是 AEAD。
+随后取得非零 32 位种子，保证 xorshift 状态不会以零启动。布局随机流与认证密钥使用不同域。xorshift 仍是可逆混淆，不是 AEAD；完整性由后述分块标签单独负责。
 
 ### 5.2 VMP 兼容性预检
 
@@ -218,9 +220,36 @@ llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
 - 每函数的 IP、数据区地址、数据区和 xorshift 状态使用 TLS，改善多线程并发隔离；
 - 直接递归提前拒绝，互递归和间接递归仍不能完全静态识别；
 - ConstantExpr 在翻译时会被物化为等价指令，极晚期失败时尚未实现完整 IR 事务回滚；
-- VM 内部栈和调用栈的完整动态预算仍是后续工作。
+- 旧版解释器没有独立操作数栈；数据值槽继续按实际结果动态创建；
+- 运行时限制 opcode 步数、Call opcode 次数和线程共享调用深度，并用每函数活动标志拒绝同函数重入。
 
-### 5.5 运行时段边界与 fail-closed
+### 5.5 分块认证与执行预算
+
+每个基本块格式由原来的 8 字节种子头升级为固定 32 字节认证头：
+
+```text
+opcode_seed : u32
+code_seed   : u32
+body_size   : u32
+magic       : u32
+tag0        : u64
+tag1        : u64
+ciphertext  : body_size bytes
+```
+
+翻译器使用独立的 `legacy-vmp-integrity` 域派生 128 位函数密钥。两个域分离的 SipHash-2-4 标签覆盖版本、块偏移、正文长度、两个种子及加密正文。解释器先验证范围、magic 和两个标签，再设置流状态和 IP。branch/switch 目标必须指向完整块头，读取也不能跨过当前认证块。
+
+新增运行时参数：
+
+```text
+-irobf-vmp-max-runtime-steps=10000000
+-irobf-vmp-max-runtime-calls=65536
+-irobf-vmp-max-call-depth=64
+```
+
+0 表示关闭对应限制。步数预算限制循环，调用预算限制单次解释中的 Call opcode，模块级 TLS 深度限制跨 VMP 函数嵌套；每函数 TLS 活动标志拒绝同函数重入。密钥位于客户端，所以标签不是不可伪造的远程信任根，也不提供 xorshift 之外的保密性。
+
+### 5.6 运行时段边界与 fail-closed
 
 解释器 ABI 新增三个每函数元数据：
 
@@ -242,17 +271,24 @@ VM_FAULT_INVALID_SIZE
 VM_FAULT_INVALID_OPCODE
 VM_FAULT_ARITHMETIC
 VM_FAULT_BAD_STATE
+VM_FAULT_INTEGRITY
+VM_FAULT_STEP_LIMIT
+VM_FAULT_CALL_LIMIT
+VM_FAULT_CALL_DEPTH
+VM_FAULT_REENTRANT
+VM_FAULT_BLOCK_RANGE
 ```
 
 运行时规则：
 
-- 所有 code 字节读取在推进 IP 前验证剩余长度；
+- 每次进入基本块先验证双标签，所有 code 字节读取同时受当前块和总 code 段边界约束；
 - VM 内部 data 读写统一使用 offset + size 边界检查；
 - data 段内的绝对地址自动转回受检 offset；
 - branch/switch 目标必须落在 code 段内；
 - switch 的 case 数必须小于等于剩余字节可容纳数量，防止篡改计数造成长循环；
 - opcode 解码设置尝试上限；
 - 除零、越界移位、非法宽度和无效 opcode 设置 fault；
+- opcode 步数、Call 次数、调用深度和重入超过预算时设置独立 fault；
 - 返回后保留返回值槽并清零其余 data 段；
 - 首个 fault 触发 `__builtin_trap()` fail-closed。
 
@@ -260,7 +296,7 @@ VM_FAULT_BAD_STATE
 
 该边界只能完整覆盖 VM 自有 code/data 段。非空外部原始指针没有可移植的对象长度元数据，因此只能做空地址检查，不能承诺防止所有调用方指针错误。
 
-### 5.6 嵌入产物与可执行测试
+### 5.7 嵌入产物与可执行测试
 
 仓库中的 `aVMPInterpreter/aVMPInterpreter.bc` 已由最新解释器 C 源重新生成，`llvm/include/llvm/Transforms/Obfuscation/vm.h` 由 bitcode 的原始字节生成。
 
@@ -280,11 +316,13 @@ VM_FAULT_BAD_STATE
 - 篡改的 switch case 数；
 - 非法 branch 目标；
 - 返回后临时 data 清理；
-- 解释器坏状态。
+- 解释器坏状态；
+- 固定 SipHash 向量、合法认证块、密文/标签/长度篡改和块内越界；
+- opcode 步数、Call 次数、调用深度和重入预算。
 
 `tools/vmp-compatibility-smoke.cpp` 使用 LLVM AsmParser 解析真实 IR，验证允许、拒绝和资源超限场景。CI 还会分别编译 `VMPCompatibility.cpp` 和集成后的 `aVMP.cpp`。
 
-需要明确：运行时边界和兼容性预检不能替代 VMP 字节码认证。现有字节流仍无密码学篡改标签。
+需要明确：双 SipHash 标签会在执行前检测块篡改，但密钥和验证器同驻客户端，不能提供服务端级不可伪造信任；xorshift 也仍不是 AEAD。
 
 ## 6. 环境诊断
 
@@ -384,9 +422,9 @@ python3 tools/allvm-doctor.py --json
 ### P0/P1
 
 1. 字符串记录改为标准 AEAD，并定义缓存、TLS 和调用期明文生命周期；
-2. VMP 字节码增加分块完整性标签；
-3. 在已动态化 code/data 缓冲并加入资源预检的基础上，继续动态化 VM 内部栈和调用栈；
-4. 扩展 capability analysis 覆盖面、互递归检测和机器可读跳过报告；
+2. 扩展 capability analysis 覆盖面、互递归静态检测和机器可读跳过报告；
+3. 为分块认证增加可选设备/服务端派生因子，降低纯离线重签名能力；
+4. 增加真实 Android 递归、并发和长循环的预算回归矩阵；
 5. 清理符号、日志、统计数据中的密钥和内部状态；
 6. 修复自定义 ELF 装载器的 16 KiB 页、边界溢出和 W^X；
 7. 在现有显式 NDK 和安全默认值基础上实现完整 toolchain overlay，移除向 NDK 复制工具的兼容模式。

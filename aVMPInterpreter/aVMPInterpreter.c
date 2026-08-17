@@ -1,4 +1,5 @@
 #include "aVMPInterpreter.h"
+#include "VMPIntegrity.h"
 
 // #define GOVM_CPP_DEBUG
 
@@ -61,14 +62,110 @@ VM_FORCE_INLINE void vm_fail_closed(void) {
 #endif
 }
 
-VM_FORCE_INLINE int vm_set_ip(uint64_t target) {
-    if (target >= code_seg_size || target > 0x7fffffffULL) {
+VM_FORCE_INLINE uint32_t vm_read_u32_raw(uint64_t offset) {
+    if (code_seg_addr == 0 || !vm_range_valid(offset, 4U, code_seg_size)) {
         vm_set_fault(VM_FAULT_CODE_RANGE);
+        return 0;
+    }
+    return (uint32_t)vmp_integrity_load32_le(
+        (const vmp_u8 *)(uintptr_t)(code_seg_addr + offset));
+}
+
+VM_FORCE_INLINE uint64_t vm_read_u64_raw(uint64_t offset) {
+    if (code_seg_addr == 0 || !vm_range_valid(offset, 8U, code_seg_size)) {
+        vm_set_fault(VM_FAULT_CODE_RANGE);
+        return 0;
+    }
+    return (uint64_t)vmp_integrity_load64_le(
+        (const vmp_u8 *)(uintptr_t)(code_seg_addr + offset));
+}
+
+#ifdef IS_INLINE_FUNC
+    __inline__ __attribute__((always_inline))
+#endif
+int vm_enter_block(uint64_t block_offset) {
+    uint32_t opcode_seed;
+    uint32_t code_seed;
+    uint32_t body_size;
+    uint32_t magic;
+    uint64_t expected_tag0;
+    uint64_t expected_tag1;
+    uint64_t computed_tag0 = 0;
+    uint64_t computed_tag1 = 0;
+    uint64_t body_start;
+    uint64_t body_end;
+    const vmp_u8 *ciphertext;
+
+    if (vm_fault != VM_FAULT_NONE)
+        return 0;
+    if (block_offset > 0x7FFFFFFFULL ||
+        !vm_range_valid(block_offset, VMP_BLOCK_HEADER_SIZE, code_seg_size)) {
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
+        return 0;
+    }
+
+    opcode_seed = vm_read_u32_raw(
+        block_offset + VMP_BLOCK_OPCODE_SEED_OFFSET);
+    code_seed = vm_read_u32_raw(
+        block_offset + VMP_BLOCK_CODE_SEED_OFFSET);
+    body_size = vm_read_u32_raw(
+        block_offset + VMP_BLOCK_BODY_SIZE_OFFSET);
+    magic = vm_read_u32_raw(block_offset + VMP_BLOCK_MAGIC_OFFSET);
+    expected_tag0 = vm_read_u64_raw(block_offset + VMP_BLOCK_TAG0_OFFSET);
+    expected_tag1 = vm_read_u64_raw(block_offset + VMP_BLOCK_TAG1_OFFSET);
+    if (vm_fault != VM_FAULT_NONE)
+        return 0;
+    if (magic != VMP_BLOCK_MAGIC || opcode_seed == 0U || code_seed == 0U) {
+        vm_set_fault(VM_FAULT_INTEGRITY);
+        return 0;
+    }
+
+    body_start = block_offset + VMP_BLOCK_HEADER_SIZE;
+    body_end = body_start + (uint64_t)body_size;
+    if (body_end < body_start || body_end > 0x7FFFFFFFULL ||
+        !vm_range_valid(body_start, body_size, code_seg_size)) {
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
+        return 0;
+    }
+
+    ciphertext = (const vmp_u8 *)(uintptr_t)(code_seg_addr + body_start);
+    vmp_integrity_block_tags(
+        ciphertext, body_size, vm_integrity_key0, vm_integrity_key1,
+        block_offset, opcode_seed, code_seed,
+        &computed_tag0, &computed_tag1);
+    if (!(vmp_integrity_tag_equal(expected_tag0, computed_tag0) &
+          vmp_integrity_tag_equal(expected_tag1, computed_tag1))) {
+        vm_set_fault(VM_FAULT_INTEGRITY);
+        return 0;
+    }
+
+    opcode_xorshift32_state = opcode_seed;
+    vm_code_state = code_seed;
+    ip = (int)body_start;
+    vm_block_end = body_end;
+    return 1;
+}
+
+VM_FORCE_INLINE int vm_consume_budget(uint64_t *remaining,
+                                      uint32_t fault_code) {
+    if (*remaining == 0) {
+        vm_set_fault(fault_code);
+        return 0;
+    }
+    --*remaining;
+    return 1;
+}
+
+VM_FORCE_INLINE int vm_set_ip(uint64_t target) {
+    if (target > 0x7FFFFFFFULL ||
+        !vm_range_valid(target, VMP_BLOCK_HEADER_SIZE, code_seg_size)) {
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
         return 0;
     }
     ip = (int)target;
     return 1;
 }
+
 
 #ifdef IS_INLINE_FUNC
     __inline__ __attribute__((always_inline))
@@ -77,8 +174,13 @@ uint8_t get_byte_code() {
     if (vm_fault != VM_FAULT_NONE)
         return 0;
     if (code_seg_addr == 0 || ip < 0 ||
-        !vm_range_valid((uint64_t)ip, 1, code_seg_size)) {
+        !vm_range_valid((uint64_t)ip, 1U, code_seg_size)) {
         vm_set_fault(VM_FAULT_CODE_RANGE);
+        return 0;
+    }
+    if (vm_block_end == 0 ||
+        !vm_range_valid((uint64_t)ip, 1U, vm_block_end)) {
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
         return 0;
     }
 
@@ -86,6 +188,7 @@ uint8_t get_byte_code() {
     tmp ^= (uint8_t)(xorshift32(&vm_code_state) & 0xFFU);
     return tmp;
 }
+
 
 #ifdef IS_INLINE_FUNC
     __inline__ __attribute__((always_inline))
@@ -121,11 +224,17 @@ uint64_t unpack_code(int size) {
         vm_set_fault(VM_FAULT_CODE_RANGE);
         return 0;
     }
+    if (vm_block_end == 0 ||
+        !vm_range_valid((uint64_t)ip, (uint64_t)size, vm_block_end)) {
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
+        return 0;
+    }
 
     for (int i = 0; i < size; ++i)
         res |= (uint64_t)get_byte_code() << (8 * i);
     return res;
 }
+
 
 #ifdef IS_INLINE_FUNC
     __inline__ __attribute__((always_inline))
@@ -641,13 +750,13 @@ void switch_handler() {
 
     const uint64_t bytes_per_case =
         (uint64_t)case_val_size + (uint64_t)pointer_size;
-    if (ip < 0 || (uint64_t)ip > code_seg_size) {
-        vm_set_fault(VM_FAULT_CODE_RANGE);
+    if (vm_block_end == 0 || ip < 0 || (uint64_t)ip > vm_block_end) {
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
         return;
     }
-    const uint64_t remaining_code = code_seg_size - (uint64_t)ip;
+    const uint64_t remaining_code = vm_block_end - (uint64_t)ip;
     if ((uint64_t)num_cases > remaining_code / bytes_per_case) {
-        vm_set_fault(VM_FAULT_CODE_RANGE);
+        vm_set_fault(VM_FAULT_BLOCK_RANGE);
         return;
     }
 
@@ -822,28 +931,46 @@ uint8_t get_opcode() {
 
 
 void vm_interpreter() {
+    int entered_frame = 0;
+    uint64_t next_block = 0;
+
     pointer_size = sizeof(void *);
     vm_fault = VM_FAULT_NONE;
     ip = 0;
+    vm_block_end = 0;
+    vm_steps_remaining =
+        vm_step_limit == 0 ? ~(uint64_t)0 : vm_step_limit;
+    vm_calls_remaining =
+        vm_call_limit == 0 ? ~(uint64_t)0 : vm_call_limit;
 
     if (pointer_size != 8 || code_seg_addr == 0 || data_seg_addr == 0 ||
-        code_seg_size < 8 || data_seg_size == 0) {
+        code_seg_size < VMP_BLOCK_HEADER_SIZE || data_seg_size == 0) {
         vm_set_fault(VM_FAULT_BAD_STATE);
-        vm_fail_closed();
-        return;
+        goto cleanup;
+    }
+    if (vm_frame_active != 0U) {
+        vm_set_fault(VM_FAULT_REENTRANT);
+        goto cleanup;
+    }
+    if (vm_call_depth_limit != 0 &&
+        vm_call_depth >= vm_call_depth_limit) {
+        vm_set_fault(VM_FAULT_CALL_DEPTH);
+        goto cleanup;
     }
 
-    uint8_t is_a_new_bb = 1;
-    while (vm_fault == VM_FAULT_NONE) {
-        if (is_a_new_bb) {
-            opcode_xorshift32_state = get_xorshift_seed();
-            vm_code_state = get_xorshift_seed();
-            is_a_new_bb = 0;
-            if (vm_fault != VM_FAULT_NONE)
-                break;
-        }
+    vm_frame_active = 1U;
+    ++vm_call_depth;
+    entered_frame = 1;
 
-        uint8_t opcode = get_opcode();
+    if (!vm_enter_block(0))
+        goto cleanup;
+
+    while (vm_fault == VM_FAULT_NONE) {
+        if (!vm_consume_budget(
+                &vm_steps_remaining, VM_FAULT_STEP_LIMIT))
+            break;
+
+        const uint8_t opcode = get_opcode();
         if (vm_fault != VM_FAULT_NONE)
             break;
 
@@ -873,13 +1000,17 @@ void vm_interpreter() {
                 break;
             case BR_OP:
                 br_handler();
-                if (vm_fault == VM_FAULT_NONE)
-                    is_a_new_bb = 1;
+                if (vm_fault == VM_FAULT_NONE) {
+                    next_block = (uint64_t)ip;
+                    (void)vm_enter_block(next_block);
+                }
                 break;
             case SWITCH_OP:
                 switch_handler();
-                if (vm_fault == VM_FAULT_NONE)
-                    is_a_new_bb = 1;
+                if (vm_fault == VM_FAULT_NONE) {
+                    next_block = (uint64_t)ip;
+                    (void)vm_enter_block(next_block);
+                }
                 break;
             case INSERTVALUE_OP:
             case EXTRACTVALUE_OP:
@@ -887,12 +1018,12 @@ void vm_interpreter() {
                 break;
             case Ret_OP:
                 return_handler();
-                if (vm_fault != VM_FAULT_NONE)
-                    vm_fail_closed();
-                return;
+                goto cleanup;
             case Call_OP: {
-                uint64_t target_function_id = unpack_code(pointer_size);
-                if (vm_fault == VM_FAULT_NONE)
+                const uint64_t target_function_id = unpack_code(pointer_size);
+                if (vm_fault == VM_FAULT_NONE &&
+                    vm_consume_budget(
+                        &vm_calls_remaining, VM_FAULT_CALL_LIMIT))
                     call_handler(target_function_id);
                 break;
             }
@@ -902,9 +1033,16 @@ void vm_interpreter() {
         }
     }
 
+cleanup:
+    if (entered_frame) {
+        vm_frame_active = 0U;
+        if (vm_call_depth != 0)
+            --vm_call_depth;
+    }
     if (vm_fault != VM_FAULT_NONE)
         vm_fail_closed();
 }
+
 
 // Main function removed - VM interpreter should be linked, not executed directly
 // int main() {

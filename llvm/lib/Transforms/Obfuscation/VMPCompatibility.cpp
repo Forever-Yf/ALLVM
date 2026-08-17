@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Obfuscation/VMPCompatibility.h"
+#include "../../../../aVMPInterpreter/VMPIntegrity.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -467,8 +468,9 @@ analyzeVMPFunction(const Function &F, const VMPResourceLimits &Limits) {
 
   for (const BasicBlock &BB : F) {
     ++Result.BasicBlockCount;
-    if (!checkedAdd(Result.EstimatedCodeBytes, 8))
-      reject(Result, "基本块随机种子导致代码大小溢出");
+    if (!checkedAdd(Result.EstimatedCodeBytes,
+                    VMP_BLOCK_HEADER_SIZE))
+      reject(Result, "基本块认证头导致代码大小溢出");
 
     for (const Instruction &I : BB) {
       ++Result.InstructionCount;

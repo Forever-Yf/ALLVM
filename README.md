@@ -25,6 +25,8 @@
 - 旧版 VMP 不再使用 `srand(time(0))` 和 `rand()` 生成种子；
 - 新增 VMP 兼容性预检、可配置资源阈值、严格失败模式、实际容量检查与 IR verifier；
 - VMP 解释器加入 code/data 段长度、TLS fault 状态、跳转/switch 边界、fail-closed 和返回后临时数据清理；
+- VMP 每个基本块采用 32 字节认证头和双 64 位 SipHash 标签，执行前认证块元数据与加密正文；
+- VMP 增加每次调用的 opcode 步数、Call opcode 次数、线程共享调用深度和同函数重入限制；
 - 重新生成嵌入 bitcode，并用 `tools/check-vmp-embed.py` 校验 `.bc` 与 `vm.h` 逐字节一致；
 - 修复常量保护 Pass 对 PHI incoming value 的处理和空工作集判断；
 - 新增 `tools/allvm-doctor.py`，可诊断 NDK、构建工具和 16 KiB ELF 对齐；
@@ -39,7 +41,7 @@
 |---|---|---|
 | 常量整数/浮点保护 | 使用构建级安全随机根并按 Pass 分离 | 主要用于隐藏和增加分析成本，不等同于服务端秘密管理 |
 | 字符串保护 | 按模块分离随机域、无偏选择密钥长度，并清理编译期临时缓冲 | 现有记录格式仍是自定义可逆变换，密钥与密文同驻二进制，尚无标准 AEAD 完整性标签 |
-| 旧版 VMP | 按模块和函数派生种子；转换前检查 IR/ABI/资源；运行时检查 code/data 段与跳转边界；TLS fault fail-closed；转换后运行 IR verifier | 当前嵌入解释器仅支持 64 位目标；外部原始指针仍无法获知对象长度；字节码仍使用 xorshift 且没有认证标签 |
+| 旧版 VMP | 布局与认证密钥按函数分域；转换前检查 IR/ABI/资源；每块执行前验证双 SipHash 标签；运行时限制步数、调用数、线程调用深度和重入；TLS fault fail-closed；转换后运行 IR verifier | 当前嵌入解释器仅支持 64 位目标；外部原始指针仍无法获知对象长度；认证密钥位于客户端，标签不是 AEAD，也不提供密钥不可提取保证 |
 | 控制流平坦化 | 改变基本块调度结构 | 可能增加体积、寄存器压力和编译时间 |
 | 间接调用/跳转 | 隐藏直接调用与分支关系 | 对异常、内联汇编和特殊控制流需充分回归 |
 | Syscall Protect | ARM64 下将部分 libc 调用替换为直接系统调用 | 与 Android 版本、ABI 和 seccomp 策略相关，不适合无条件全开 |
@@ -184,7 +186,8 @@ D:\Android\Sdk\ndk\29.0.14206865\ndk-build.cmd `
 ├── constant-int
 ├── constant-fp
 ├── string-encryption | ModuleIdentifier
-└── legacy-vmp | ModuleIdentifier | FunctionName
+├── legacy-vmp-layout | ModuleIdentifier | FunctionName
+└── legacy-vmp-integrity | ModuleIdentifier | FunctionName
 ```
 
 不同构建应生成不同的常量编码和 VMP 种子。
@@ -272,6 +275,9 @@ LOCAL_CFLAGS += -mllvm -level-indbr=3
 LOCAL_CFLAGS += -mllvm -irobf-vmp
 # CI/发布构建可启用严格模式：不兼容函数直接使构建失败
 LOCAL_CFLAGS += -mllvm -irobf-vmp-strict
+LOCAL_CFLAGS += -mllvm -irobf-vmp-max-runtime-steps=10000000
+LOCAL_CFLAGS += -mllvm -irobf-vmp-max-runtime-calls=65536
+LOCAL_CFLAGS += -mllvm -irobf-vmp-max-call-depth=64
 LOCAL_CFLAGS += -frtti -fno-exceptions
 ```
 
@@ -300,6 +306,9 @@ int VMP_PROTECT verify_license(const char *token, int length) {
 | `-mllvm -irobf-vmp-max-instructions=N` | `50000` | 单个函数允许的最大指令数 |
 | `-mllvm -irobf-vmp-max-code-bytes=N` | `16777216` | 估算和实际 VM 字节码上限，16 MiB |
 | `-mllvm -irobf-vmp-max-data-bytes=N` | `16777216` | 估算和实际 VM 数据区上限，16 MiB |
+| `-mllvm -irobf-vmp-max-runtime-steps=N` | `10000000` | 单次解释调用允许的最大 opcode 步数，0 表示不限 |
+| `-mllvm -irobf-vmp-max-runtime-calls=N` | `65536` | 单次解释调用允许的最大 Call opcode 次数，0 表示不限 |
+| `-mllvm -irobf-vmp-max-call-depth=N` | `64` | 同一线程允许的嵌套 VMP wrapper 深度，0 表示不限 |
 | `-mllvm -irobf-vmp-strict` | 关闭 | 不再跳过，而是对不兼容函数直接报错 |
 
 数值限制设为 `0` 表示关闭对应阈值，但通常不建议在不受信任或自动生成的 IR 上这样做。
@@ -318,8 +327,14 @@ int VMP_PROTECT verify_license(const char *token, int length) {
 
 代码和数据缓冲区现按实际翻译结果动态创建，并在翻译期间再次检查实际大小及跳转补丁边界。只有翻译器和嵌入解释器都成功后，才为目标函数添加 `noinline/optnone` 并改写函数体；失败或跳过不会留下这些属性。
 
-每个受保护函数的可变运行状态被放入线程局部存储，改善不同线程同时调用的隔离性。**直接递归会被拒绝**；互递归和间接递归仍无法完全静态识别，应避免用于 VMP 函数。VM 内部栈和调用栈的完整动态预算仍属于后续工作。
+每个受保护函数的可变运行状态被放入线程局部存储。直接递归仍在预检阶段拒绝；运行时另用模块级 TLS 记录跨 VMP 函数调用深度，并用每函数 `vm_frame_active` 拒绝同函数重入，因此互递归或间接递归即使逃过静态分析也会 fail-closed。旧版解释器没有独立操作数栈，值槽已按实际数据区动态创建；新增的步数、Call 次数和调用深度预算用于限制循环和嵌套执行资源。
 
+
+#### 分块认证
+
+每个 VM 基本块现在使用固定 32 字节头：两个非零随机种子、密文正文长度、格式 magic 和两个 64 位认证标签。标签使用按函数独立派生的 128 位密钥，对块偏移、版本、正文长度、两个种子和**加密后的正文**计算。branch/switch 只能跳到完整块头，解释器在设置 opcode/代码流状态前先认证目标块，任意正文、长度、种子、标签或块位置变更都会设置 `VM_FAULT_INTEGRITY` 或 `VM_FAULT_BLOCK_RANGE`。
+
+这是客户端内嵌密钥的分块 MAC，不是 AEAD：xorshift 仍只负责混淆，标签不提供额外保密性；有能力提取并复用客户端密钥的攻击者仍可重签名补丁。它解决的是未授权修改在执行前可检测，以及普通二进制补丁不能再静默改变 VM 语义。
 
 #### 运行时段边界与 fail-closed
 
@@ -335,15 +350,23 @@ VM_FAULT_INVALID_SIZE
 VM_FAULT_INVALID_OPCODE
 VM_FAULT_ARITHMETIC
 VM_FAULT_BAD_STATE
+VM_FAULT_INTEGRITY
+VM_FAULT_STEP_LIMIT
+VM_FAULT_CALL_LIMIT
+VM_FAULT_CALL_DEPTH
+VM_FAULT_REENTRANT
+VM_FAULT_BLOCK_RANGE
 ```
 
 运行时会检查：
 
-- opcode、种子、立即数和 switch 表不能越过 code 段；
+- 块头和密文正文必须通过双标签认证，且读取不能越过当前认证块；
+- opcode、立即数和 switch 表不能越过当前块或 code 段；
 - VM 内部 data 段读写不能越界；
 - branch/switch 目标必须落在有效 code 段内；
 - switch case 数不能超过剩余字节实际可容纳的数量；
 - 访问空地址、非法值宽度、除零、越界移位和无效 opcode 会设置 fault；
+- 每次解释调用限制 opcode 步数和 Call opcode 次数；跨函数共享 TLS 调用深度，并拒绝同函数重入；
 - 返回时保留返回值槽，并清零其余 VM data 段；
 - 状态或字节码损坏时通过 `__builtin_trap()` fail-closed，而不是继续解释不可信数据。
 
@@ -357,7 +380,7 @@ python3 tools/check-vmp-embed.py
 
 可验证 bitcode magic、声明长度、逐字节一致性、include guard 和 SHA-256 摘要。
 
-需要明确：xorshift 字节流仍只是可逆混淆，不是 AEAD，修改 VM 字节码也尚无统一认证标签。预检和运行时边界解决的是语义兼容性、资源失控、越界和静默错误，不等于密码学完整性保护。
+需要明确：xorshift 字节流仍只是可逆混淆，不是 AEAD。新增双 SipHash 标签提供执行前的分块完整性验证，但认证密钥也存在于客户端，因此不能替代服务端信任、硬件密钥或不可导出的长期秘密。
 
 ## 参数速查
 
@@ -390,6 +413,9 @@ python3 tools/check-vmp-embed.py
 | `-mllvm -irobf-vmp-max-instructions=N` | VMP 指令上限；默认 50000，0 表示关闭 |
 | `-mllvm -irobf-vmp-max-code-bytes=N` | VMP 代码预算；默认 16 MiB，0 表示关闭 |
 | `-mllvm -irobf-vmp-max-data-bytes=N` | VMP 数据预算；默认 16 MiB，0 表示关闭 |
+| `-mllvm -irobf-vmp-max-runtime-steps=N` | 单次 VM opcode 步数预算；默认 10000000 |
+| `-mllvm -irobf-vmp-max-runtime-calls=N` | 单次 Call opcode 预算；默认 65536 |
+| `-mllvm -irobf-vmp-max-call-depth=N` | 每线程嵌套 VMP wrapper 深度；默认 64 |
 | `-mllvm -irobf-vmp-strict` | 不兼容 VMP 函数直接使构建失败 |
 
 ### 运行时检测
@@ -488,7 +514,8 @@ llvm-readelf -lW protected.so
 | `llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp` | 整数常量保护 |
 | `llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp` | 浮点常量保护 |
 | `llvm/lib/Transforms/Obfuscation/StringEncryption.cpp` | 字符串保护 |
-| `aVMPInterpreter/aVMPInterpreter.c` | 带 code/data 边界和 fail-closed fault 的嵌入解释器源码 |
+| `aVMPInterpreter/VMPIntegrity.h` | 翻译器与解释器共享的认证块格式和双 SipHash 标签实现 |
+| `aVMPInterpreter/aVMPInterpreter.c` | 带分块认证、执行预算、code/data 边界和 fail-closed fault 的嵌入解释器源码 |
 | `aVMPInterpreter/aVMPInterpreter.bc` | 由解释器 C 源生成的嵌入 bitcode |
 | `llvm/include/llvm/Transforms/Obfuscation/vm.h` | bitcode 的逐字节 C++ 嵌入头 |
 | `llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h` | VMP 预检结果和资源限制接口 |

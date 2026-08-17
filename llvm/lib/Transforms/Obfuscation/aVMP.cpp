@@ -48,6 +48,7 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Transforms/Obfuscation/aVMP.h"
 #include "llvm/Transforms/Obfuscation/vm.h"
+#include "../../../../aVMPInterpreter/VMPIntegrity.h"
 #include <assert.h>
 #include <cstdint>
 #include <functional>
@@ -79,6 +80,15 @@ static cl::opt<uint64_t> VMPMaxDataBytes(
 static cl::opt<bool> VMPStrictCompatibility(
     "irobf-vmp-strict", cl::init(false),
     cl::desc("Fail compilation instead of skipping an incompatible VMP function"));
+static cl::opt<uint64_t> VMPMaxRuntimeSteps(
+    "irobf-vmp-max-runtime-steps", cl::init(10000000ULL),
+    cl::desc("Maximum VM opcodes per invocation; 0 disables the limit"));
+static cl::opt<uint64_t> VMPMaxRuntimeCalls(
+    "irobf-vmp-max-runtime-calls", cl::init(65536ULL),
+    cl::desc("Maximum VM call opcodes per invocation; 0 disables the limit"));
+static cl::opt<uint64_t> VMPMaxCallDepth(
+    "irobf-vmp-max-call-depth", cl::init(64ULL),
+    cl::desc("Maximum nested VMP wrapper depth per thread; 0 disables the limit"));
 
 static allvm::VMPResourceLimits currentVMPResourceLimits() {
     allvm::VMPResourceLimits Limits;
@@ -240,11 +250,20 @@ class GOVMTranslator {
             this->pointer_size = modDataLayout->getPointerSize();  // 动态获取指针大小
             this->ResourceLimits = Limits;
 
-            std::string RandomDomain = "legacy-vmp|";
-            RandomDomain += this->Mod->getModuleIdentifier();
-            RandomDomain += '|';
-            RandomDomain += this->F->getName().str();
-            allvm::seedCryptoUtils(RandomEngine, RandomDomain.c_str());
+            std::string DomainSuffix = this->Mod->getModuleIdentifier();
+            DomainSuffix += '|';
+            DomainSuffix += this->F->getName().str();
+
+            std::string LayoutDomain = "legacy-vmp-layout|" + DomainSuffix;
+            allvm::seedCryptoUtils(RandomEngine, LayoutDomain.c_str());
+
+            std::string IntegrityDomain =
+                "legacy-vmp-integrity|" + DomainSuffix;
+            allvm::seedCryptoUtils(IntegrityEngine, IntegrityDomain.c_str());
+            do {
+                IntegrityKey0 = IntegrityEngine.get_uint64_t();
+                IntegrityKey1 = IntegrityEngine.get_uint64_t();
+            } while ((IntegrityKey0 | IntegrityKey1) == 0);
 
             // construct function and global variables
             init();
@@ -255,6 +274,9 @@ class GOVMTranslator {
         DataLayout * modDataLayout;
         unsigned pointer_size;  // 动态获取的指针大小,支持不同架构
         CryptoUtils RandomEngine;
+        CryptoUtils IntegrityEngine;
+        uint64_t IntegrityKey0 = 0;
+        uint64_t IntegrityKey1 = 0;
         allvm::VMPResourceLimits ResourceLimits;
         bool TranslationFailed = false;
         std::string TranslationError;
@@ -353,6 +375,9 @@ class GOVMTranslator {
                        : static_cast<uint64_t>(curr_data_offset);
         }
 
+        uint64_t getIntegrityKey0() const { return IntegrityKey0; }
+        uint64_t getIntegrityKey1() const { return IntegrityKey1; }
+
         void failTranslation(const Twine &Reason) {
             if (!TranslationFailed)
                 TranslationError = Reason.str();
@@ -429,10 +454,14 @@ class GOVMTranslator {
         uint32_t xorshift32_state = 0;
         uint32_t xorshift32_seed = 0;
 
-        /* encrypt vm_code */
-        // mark seed for each basicblock
-        std::vector<std::tuple<uint32_t, uint32_t, uint32_t>>
-            vm_code_seed_ranges;
+        struct VMPBlockRecord {
+            uint32_t HeaderOffset;
+            uint32_t BodyBegin;
+            uint32_t BodyEnd;
+            uint32_t OpcodeSeed;
+            uint32_t CodeSeed;
+        };
+        std::vector<VMPBlockRecord> vm_blocks;
 
         void init_xorshift32() {
             xorshift32_seed = gen_xorshift32_seed();
@@ -480,13 +509,53 @@ class GOVMTranslator {
         }
 
         void encrypt_vm_code() {
-            for (const auto &Range : vm_code_seed_ranges) {
-                uint32_t vm_code_seed = std::get<0>(Range);
-                const uint32_t Begin = std::get<1>(Range);
-                const uint32_t End = std::get<2>(Range);
-                for (uint32_t addr = Begin; addr < End; ++addr)
+            for (const VMPBlockRecord &Block : vm_blocks) {
+                uint32_t vm_code_seed = Block.CodeSeed;
+                for (uint32_t addr = Block.BodyBegin;
+                     addr < Block.BodyEnd; ++addr)
                     vm_code[addr] ^= (xorshift32(&vm_code_seed) & 0xFF);
             }
+        }
+
+        bool seal_vm_blocks() {
+            for (const VMPBlockRecord &Block : vm_blocks) {
+                if (Block.BodyEnd < Block.BodyBegin ||
+                    static_cast<size_t>(Block.HeaderOffset) +
+                            VMP_BLOCK_HEADER_SIZE >
+                        vm_code.size() ||
+                    Block.BodyEnd > vm_code.size()) {
+                    failTranslation("VMP authenticated block range is invalid");
+                    return false;
+                }
+
+                const uint64_t BodySize64 =
+                    static_cast<uint64_t>(Block.BodyEnd - Block.BodyBegin);
+                if (BodySize64 > std::numeric_limits<uint32_t>::max()) {
+                    failTranslation("VMP authenticated block body exceeds 32-bit size");
+                    return false;
+                }
+
+                uint8_t *Header = vm_code.data() + Block.HeaderOffset;
+                vmp_integrity_store32_le(
+                    Header + VMP_BLOCK_BODY_SIZE_OFFSET,
+                    static_cast<vmp_u32>(BodySize64));
+                vmp_integrity_store32_le(
+                    Header + VMP_BLOCK_MAGIC_OFFSET, VMP_BLOCK_MAGIC);
+
+                vmp_u64 Tag0 = 0;
+                vmp_u64 Tag1 = 0;
+                vmp_integrity_block_tags(
+                    vm_code.data() + Block.BodyBegin,
+                    static_cast<vmp_u32>(BodySize64),
+                    IntegrityKey0, IntegrityKey1,
+                    Block.HeaderOffset, Block.OpcodeSeed, Block.CodeSeed,
+                    &Tag0, &Tag1);
+                vmp_integrity_store64_le(
+                    Header + VMP_BLOCK_TAG0_OFFSET, Tag0);
+                vmp_integrity_store64_le(
+                    Header + VMP_BLOCK_TAG1_OFFSET, Tag1);
+            }
+            return true;
         }
 
         // Encode one opcode as its ordinal in a collision-free xorshift byte sequence.
@@ -1530,11 +1599,16 @@ bool GOVMTranslator::run(){
             failTranslation("basic block offset exceeds signed-int range");
             return false;
         }
-        basicblock_map.emplace(bb, static_cast<int>(vm_code.size()));
+        const uint32_t block_header =
+            static_cast<uint32_t>(vm_code.size());
+        basicblock_map.emplace(bb, static_cast<int>(block_header));
 
-        opcode_seed_setup();
+        const uint32_t opcode_seed = opcode_seed_setup();
         const uint32_t vm_code_seed = vm_code_seed_setup();
-        const uint32_t currbb_begin = static_cast<uint32_t>(vm_code.size());
+        vm_code.resize(
+            vm_code.size() + VMP_BLOCK_HEADER_SIZE - 8U, 0);
+        const uint32_t currbb_begin =
+            static_cast<uint32_t>(vm_code.size());
 
         std::vector<Instruction *> instructions_to_process;
         for (auto ins = bbl->begin(); ins != bbl->end(); ++ins)
@@ -1567,7 +1641,8 @@ bool GOVMTranslator::run(){
         }
 
         const uint32_t currbb_end = static_cast<uint32_t>(vm_code.size());
-        vm_code_seed_ranges.emplace_back(vm_code_seed, currbb_begin, currbb_end);
+        vm_blocks.push_back({block_header, currbb_begin, currbb_end,
+                             opcode_seed, vm_code_seed});
         if (!checkActualResourceUsage())
             return false;
     }
@@ -1610,6 +1685,8 @@ bool GOVMTranslator::run(){
         return false;
 
     encrypt_vm_code();
+    if (!seal_vm_blocks())
+        return false;
     construct_gv();
     for (const auto &Item : callinst_map)
         handle_callinst(Item.first, Item.second);
@@ -1771,7 +1848,12 @@ class GOVMInterpreter {
     public:
         GOVMInterpreter(Function *F, Function *callinst_handler,
                         uint64_t CodeSegmentSize,
-                        uint64_t DataSegmentSize) {
+                        uint64_t DataSegmentSize,
+                        uint64_t IntegrityKey0,
+                        uint64_t IntegrityKey1,
+                        uint64_t RuntimeStepLimit,
+                        uint64_t RuntimeCallLimit,
+                        uint64_t RuntimeCallDepthLimit) {
             this->Mod = F->getParent();
             this->F = F;
             this->modDataLayout =
@@ -1779,9 +1861,15 @@ class GOVMInterpreter {
             this->callinst_handler = callinst_handler;
             this->CodeSegmentSize = CodeSegmentSize;
             this->DataSegmentSize = DataSegmentSize;
+            this->IntegrityKey0 = IntegrityKey0;
+            this->IntegrityKey1 = IntegrityKey1;
+            this->RuntimeStepLimit = RuntimeStepLimit;
+            this->RuntimeCallLimit = RuntimeCallLimit;
+            this->RuntimeCallDepthLimit = RuntimeCallDepthLimit;
 
             construct_gv();
         }
+
 
         Module * Mod;
         Function * F;
@@ -1790,6 +1878,11 @@ class GOVMInterpreter {
         Function *callinst_handler;
         uint64_t CodeSegmentSize = 0;
         uint64_t DataSegmentSize = 0;
+        uint64_t IntegrityKey0 = 0;
+        uint64_t IntegrityKey1 = 0;
+        uint64_t RuntimeStepLimit = 0;
+        uint64_t RuntimeCallLimit = 0;
+        uint64_t RuntimeCallDepthLimit = 0;
 
         GlobalVariable *pointer_size_gv;
         GlobalVariable *opcode_xorshift32_state;
@@ -1797,6 +1890,16 @@ class GOVMInterpreter {
         GlobalVariable *code_seg_size_gv;
         GlobalVariable *data_seg_size_gv;
         GlobalVariable *vm_fault_gv;
+        GlobalVariable *integrity_key0_gv;
+        GlobalVariable *integrity_key1_gv;
+        GlobalVariable *block_end_gv;
+        GlobalVariable *step_limit_gv;
+        GlobalVariable *call_limit_gv;
+        GlobalVariable *call_depth_limit_gv;
+        GlobalVariable *steps_remaining_gv;
+        GlobalVariable *calls_remaining_gv;
+        GlobalVariable *call_depth_gv;
+        GlobalVariable *frame_active_gv;
 
         virtual bool run ();
         virtual void construct_gv ();
@@ -1946,6 +2049,76 @@ void GOVMInterpreter::construct_gv() {
         GlobalValue::InternalLinkage, fault_init,
         "vm_fault_" + F->getName());
     vm_fault_gv->setThreadLocal(true);
+
+
+    Constant *key0_init = ConstantInt::get(
+        Type::getInt64Ty(Mod->getContext()), IntegrityKey0);
+    integrity_key0_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage, key0_init,
+        "vm_integrity_key0_" + F->getName());
+
+    Constant *key1_init = ConstantInt::get(
+        Type::getInt64Ty(Mod->getContext()), IntegrityKey1);
+    integrity_key1_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage, key1_init,
+        "vm_integrity_key1_" + F->getName());
+
+    Constant *zero64 = ConstantInt::get(
+        Type::getInt64Ty(Mod->getContext()), 0);
+    block_end_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), false,
+        GlobalValue::InternalLinkage, zero64,
+        "vm_block_end_" + F->getName());
+    block_end_gv->setThreadLocal(true);
+
+    step_limit_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage,
+        ConstantInt::get(Type::getInt64Ty(Mod->getContext()), RuntimeStepLimit),
+        "vm_step_limit_" + F->getName());
+    call_limit_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage,
+        ConstantInt::get(Type::getInt64Ty(Mod->getContext()), RuntimeCallLimit),
+        "vm_call_limit_" + F->getName());
+    call_depth_limit_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), true,
+        GlobalValue::InternalLinkage,
+        ConstantInt::get(Type::getInt64Ty(Mod->getContext()),
+                         RuntimeCallDepthLimit),
+        "vm_call_depth_limit_" + F->getName());
+
+    steps_remaining_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), false,
+        GlobalValue::InternalLinkage, zero64,
+        "vm_steps_remaining_" + F->getName());
+    steps_remaining_gv->setThreadLocal(true);
+    calls_remaining_gv = new GlobalVariable(
+        *Mod, Type::getInt64Ty(Mod->getContext()), false,
+        GlobalValue::InternalLinkage, zero64,
+        "vm_calls_remaining_" + F->getName());
+    calls_remaining_gv->setThreadLocal(true);
+
+    call_depth_gv =
+        Mod->getGlobalVariable("__allvm_vmp_call_depth", true);
+    if (call_depth_gv == nullptr) {
+        call_depth_gv = new GlobalVariable(
+            *Mod, Type::getInt64Ty(Mod->getContext()), false,
+            GlobalValue::InternalLinkage, zero64,
+            "__allvm_vmp_call_depth");
+        call_depth_gv->setThreadLocal(true);
+    } else if (call_depth_gv->getValueType() !=
+               Type::getInt64Ty(Mod->getContext())) {
+        report_fatal_error("ALLVM VMP call-depth TLS has an invalid type");
+    }
+
+    frame_active_gv = new GlobalVariable(
+        *Mod, Type::getInt32Ty(Mod->getContext()), false,
+        GlobalValue::InternalLinkage, fault_init,
+        "vm_frame_active_" + F->getName());
+    frame_active_gv->setThreadLocal(true);
 }
 
 // Function *govm_interpreter;
@@ -1961,11 +2134,18 @@ bool GOVMInterpreter::run() {
     std::vector<std::string> gv_list = {
         "ip", "data_seg_addr", "code_seg_addr", "pointer_size",
         "opcode_xorshift32_state", "vm_code_state",
-        "code_seg_size", "data_seg_size", "vm_fault"};
+        "code_seg_size", "data_seg_size", "vm_fault",
+        "vm_integrity_key0", "vm_integrity_key1", "vm_block_end",
+        "vm_step_limit", "vm_call_limit", "vm_call_depth_limit",
+        "vm_steps_remaining", "vm_calls_remaining", "vm_call_depth",
+        "vm_frame_active"};
     std::vector<GlobalVariable *> new_gv_list = {
         ip, data_seg_addr, code_seg_addr, pointer_size_gv,
         opcode_xorshift32_state, vm_code_state, code_seg_size_gv,
-        data_seg_size_gv, vm_fault_gv};
+        data_seg_size_gv, vm_fault_gv, integrity_key0_gv,
+        integrity_key1_gv, block_end_gv, step_limit_gv, call_limit_gv,
+        call_depth_limit_gv, steps_remaining_gv, calls_remaining_gv,
+        call_depth_gv, frame_active_gv};
     for (unsigned i = 0; i < gv_list.size(); i++) {
         GlobalVariable *old_gv = interpreter_module->getGlobalVariable(gv_list[i]);
         if (!old_gv) {
@@ -2213,6 +2393,16 @@ static void cleanupFailedVMP(GOVMTranslator &Translator,
         eraseUnusedGlobal(Interpreter->code_seg_size_gv);
         eraseUnusedGlobal(Interpreter->data_seg_size_gv);
         eraseUnusedGlobal(Interpreter->vm_fault_gv);
+        eraseUnusedGlobal(Interpreter->integrity_key0_gv);
+        eraseUnusedGlobal(Interpreter->integrity_key1_gv);
+        eraseUnusedGlobal(Interpreter->block_end_gv);
+        eraseUnusedGlobal(Interpreter->step_limit_gv);
+        eraseUnusedGlobal(Interpreter->call_limit_gv);
+        eraseUnusedGlobal(Interpreter->call_depth_limit_gv);
+        eraseUnusedGlobal(Interpreter->steps_remaining_gv);
+        eraseUnusedGlobal(Interpreter->calls_remaining_gv);
+        eraseUnusedGlobal(Interpreter->call_depth_gv);
+        eraseUnusedGlobal(Interpreter->frame_active_gv);
     }
     eraseUnusedGlobal(gv_code_seg);
     eraseUnusedGlobal(gv_data_seg);
@@ -2235,7 +2425,11 @@ static bool runVMPOnFunction(Function &F) {
 
     GOVMInterpreter Interpreter(
         &F, Translator.get_callinst_handler(),
-        Translator.getCodeSegmentSize(), Translator.getDataSegmentSize());
+        Translator.getCodeSegmentSize(), Translator.getDataSegmentSize(),
+        Translator.getIntegrityKey0(), Translator.getIntegrityKey1(),
+        static_cast<uint64_t>(VMPMaxRuntimeSteps),
+        static_cast<uint64_t>(VMPMaxRuntimeCalls),
+        static_cast<uint64_t>(VMPMaxCallDepth));
     if (!Interpreter.run()) {
         errs() << "[VMP] Embedded interpreter setup failed for '"
                << F.getName() << "'\n";

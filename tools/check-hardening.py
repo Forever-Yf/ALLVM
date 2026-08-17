@@ -56,6 +56,7 @@ def static_checks(results: list[Result]) -> None:
     vmp_preflight = read("llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp")
     vmp_smoke = read("tools/vmp-compatibility-smoke.cpp")
     interpreter_header = read("aVMPInterpreter/aVMPInterpreter.h")
+    integrity_header = read("aVMPInterpreter/VMPIntegrity.h")
     interpreter_source = read("aVMPInterpreter/aVMPInterpreter.c")
     interpreter_smoke = read("tools/vmp-interpreter-bounds-smoke.c")
     embed_checker = read("tools/check-vmp-embed.py")
@@ -110,10 +111,12 @@ def static_checks(results: list[Result]) -> None:
     )
 
     required_vmp = (
-        "legacy-vmp|",
+        "legacy-vmp-layout|",
+        "legacy-vmp-integrity|",
         "getModuleIdentifier()",
         "getName().str()",
-        "seedCryptoUtils(RandomEngine, RandomDomain.c_str())",
+        "seedCryptoUtils(RandomEngine, LayoutDomain.c_str())",
+        "seedCryptoUtils(IntegrityEngine, IntegrityDomain.c_str())",
         "while (Seed == 0)",
     )
     ok, missing = contains_all(avmp, required_vmp)
@@ -169,8 +172,13 @@ def static_checks(results: list[Result]) -> None:
         "irobf-vmp-max-instructions",
         "irobf-vmp-max-code-bytes",
         "irobf-vmp-max-data-bytes",
+        "irobf-vmp-max-runtime-steps",
+        "irobf-vmp-max-runtime-calls",
+        "irobf-vmp-max-call-depth",
         "irobf-vmp-strict",
         "analyzeVMPFunction",
+        "seal_vm_blocks",
+        "VMP_BLOCK_HEADER_SIZE",
         "checkActualResourceUsage",
         "setThreadLocal(true)",
         "verifyFunction(F, &errs())",
@@ -251,9 +259,19 @@ def static_checks(results: list[Result]) -> None:
         "VM_FAULT_DATA_RANGE",
         "VM_FAULT_INVALID_OPCODE",
         "VM_FAULT_BAD_STATE",
+        "VM_FAULT_INTEGRITY",
+        "VM_FAULT_STEP_LIMIT",
+        "VM_FAULT_CALL_LIMIT",
+        "VM_FAULT_CALL_DEPTH",
+        "VM_FAULT_REENTRANT",
+        "VM_FAULT_BLOCK_RANGE",
         "extern uint64_t code_seg_size",
         "extern uint64_t data_seg_size",
         "extern uint32_t vm_fault",
+        "extern uint64_t vm_integrity_key0",
+        "extern uint64_t vm_steps_remaining",
+        "extern uint64_t vm_call_depth",
+        "extern uint32_t vm_frame_active",
     )
     ok, missing = contains_all(interpreter_header, interpreter_header_markers)
     add(
@@ -270,10 +288,16 @@ def static_checks(results: list[Result]) -> None:
         "vm_range_valid",
         "vm_fail_closed",
         "vm_set_ip",
+        "vm_enter_block",
+        "vmp_integrity_block_tags",
+        "vm_consume_budget",
         "remaining_code / bytes_per_case",
         "VM_FAULT_ARITHMETIC",
+        "VM_FAULT_INTEGRITY",
+        "VM_FAULT_STEP_LIMIT",
+        "VM_FAULT_CALL_LIMIT",
         "data_seg_clean((int)var_size)",
-        "code_seg_size < 8",
+        "code_seg_size < VMP_BLOCK_HEADER_SIZE",
         "pointer_size != 8",
     )
     ok, missing = contains_all(interpreter_source, interpreter_source_markers)
@@ -307,7 +331,10 @@ def static_checks(results: list[Result]) -> None:
         "data_seg_size_gv",
         "vm_fault_gv",
         '"code_seg_size", "data_seg_size", "vm_fault"',
+        '"vm_integrity_key0", "vm_integrity_key1", "vm_block_end"',
+        '"vm_steps_remaining", "vm_calls_remaining", "vm_call_depth"',
         "vm_fault_gv->setThreadLocal(true)",
+        "frame_active_gv->setThreadLocal(true)",
     )
     ok, missing = contains_all(avmp, runtime_mapping_markers)
     add(
@@ -330,6 +357,14 @@ def static_checks(results: list[Result]) -> None:
     )
 
     interpreter_smoke_markers = (
+        "test_integrity_known_vector",
+        "test_authenticated_block_entry",
+        "test_authenticated_block_tamper",
+        "test_block_local_boundary",
+        "test_step_budget",
+        "test_call_budget",
+        "test_call_depth_limit",
+        "test_reentrant_guard",
         "test_valid_data_access",
         "test_data_out_of_bounds",
         "test_code_out_of_bounds",
@@ -346,6 +381,23 @@ def static_checks(results: list[Result]) -> None:
         "VMP 原生边界测试",
         ok,
         "段越界、篡改 switch、跳转、清理和坏状态场景存在"
+        if ok
+        else "缺少: " + ", ".join(missing),
+    )
+
+    integrity_markers = (
+        "VMP_BLOCK_HEADER_SIZE",
+        "VMP_BLOCK_MAGIC",
+        "vmp_integrity_block_tags",
+        "vmp_integrity_sip_round",
+        "vmp_integrity_tag_equal",
+    )
+    ok, missing = contains_all(integrity_header, integrity_markers)
+    add(
+        results,
+        "VMP 分块认证原语",
+        ok,
+        "共享双标签 SipHash 块格式存在"
         if ok
         else "缺少: " + ", ".join(missing),
     )
@@ -491,6 +543,8 @@ def static_checks(results: list[Result]) -> None:
         "VMP 兼容性预检",
         "-irobf-vmp-strict",
         "-irobf-vmp-max-code-bytes",
+        "-irobf-vmp-max-runtime-steps",
+        "分块认证",
         "运行时段边界与 fail-closed",
         "当前嵌入解释器仅支持 64 位目标",
         "check-vmp-embed.py",
@@ -513,7 +567,9 @@ def static_checks(results: list[Result]) -> None:
         "VMP 兼容性预检",
         "VMPResourceLimits",
         "运行时段边界与 fail-closed",
+        "分块认证",
         "VM_FAULT_CODE_RANGE",
+        "VM_FAULT_INTEGRITY",
         "check-vmp-embed.py",
         "构建助手",
         "验收标准",

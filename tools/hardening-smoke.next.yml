@@ -1,0 +1,293 @@
+name: Hardening smoke checks
+
+on:
+  pull_request:
+    paths:
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
+      - "build.cpp"
+      - "aVMPInterpreter/aVMPInterpreter.c"
+      - "aVMPInterpreter/aVMPInterpreter.h"
+      - "aVMPInterpreter/VMPIntegrity.h"
+      - "aVMPInterpreter/aVMPInterpreter.bc"
+      - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/vm.h"
+      - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
+      - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp"
+      - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/allvm-doctor.py"
+      - "tools/check-hardening.py"
+      - "tools/check-vmp-embed.py"
+      - "tools/vmp-compatibility-smoke.cpp"
+      - "tools/vmp-interpreter-bounds-smoke.c"
+      - ".github/workflows/hardening-smoke.yml"
+  push:
+    branches:
+      - "hardening/**"
+    paths:
+      - "README.md"
+      - "docs/ALLVM_HARDENING.md"
+      - "build.cpp"
+      - "aVMPInterpreter/aVMPInterpreter.c"
+      - "aVMPInterpreter/aVMPInterpreter.h"
+      - "aVMPInterpreter/VMPIntegrity.h"
+      - "aVMPInterpreter/aVMPInterpreter.bc"
+      - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/vm.h"
+      - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
+      - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
+      - "llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp"
+      - "llvm/lib/Transforms/Obfuscation/aVMP.cpp"
+      - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
+      - "tools/allvm-doctor.py"
+      - "tools/check-hardening.py"
+      - "tools/check-vmp-embed.py"
+      - "tools/vmp-compatibility-smoke.cpp"
+      - "tools/vmp-interpreter-bounds-smoke.c"
+      - ".github/workflows/hardening-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardening-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-hardening:
+    name: Linux hardening checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out required hardening files
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            README.md
+            docs/ALLVM_HARDENING.md
+            build.cpp
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/VMPIntegrity.h
+            aVMPInterpreter/aVMPInterpreter.bc
+            llvm/include/llvm/Transforms/Obfuscation/vm.h
+            tools/allvm-doctor.py
+            tools/check-hardening.py
+            tools/check-vmp-embed.py
+            tools/vmp-compatibility-smoke.cpp
+            tools/vmp-interpreter-bounds-smoke.c
+            llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
+            llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
+            llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
+            llvm/lib/Transforms/Obfuscation/ConstantIntEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/ConstantFPEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/StringEncryption.cpp
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Validate Python entrypoints and embedded bitcode
+        run: |
+          python3 -m py_compile \
+            tools/allvm-doctor.py \
+            tools/check-hardening.py \
+            tools/check-vmp-embed.py
+          python3 tools/allvm-doctor.py --help >/dev/null
+          python3 tools/check-vmp-embed.py
+
+      - name: Run hardening regression checker
+        run: python3 tools/check-hardening.py --compile-header
+
+      - name: Produce machine-readable hardening report
+        run: python3 tools/check-hardening.py --json > hardening-report.json
+
+      - name: Show report
+        run: cat hardening-report.json
+
+  vmp-syntax:
+    name: VMP LLVM and runtime checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out ALLVM custom headers and VMP sources
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/VMPIntegrity.h
+            aVMPInterpreter/aVMPInterpreter.bc
+            llvm/include/llvm/CryptoUtils.h
+            llvm/include/llvm/Transforms/Obfuscation
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            tools/check-vmp-embed.py
+            tools/vmp-compatibility-smoke.cpp
+            tools/vmp-interpreter-bounds-smoke.c
+          sparse-checkout-cone-mode: true
+
+      - name: Locate the newest installed LLVM toolchain
+        shell: bash
+        run: |
+          LLVM_CONFIG="$(find /usr/lib -path '*/bin/llvm-config' -type f 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$LLVM_CONFIG" ]; then
+            LLVM_CONFIG="$(command -v llvm-config || true)"
+          fi
+          if [ -z "$LLVM_CONFIG" ]; then
+            echo "No installed llvm-config was found" >&2
+            exit 1
+          fi
+          echo "LLVM_CONFIG=$LLVM_CONFIG" >> "$GITHUB_ENV"
+          echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
+          "$LLVM_CONFIG" --version
+
+      - name: Build and run native VMP interpreter bounds test
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang || command -v cc)"; fi
+          "$CC" \
+            -std=c11 \
+            -Wall -Wextra -Werror \
+            -Wno-unused-function \
+            -Wno-unused-variable \
+            -Wno-unused-parameter \
+            -Wno-strict-aliasing \
+            tools/vmp-interpreter-bounds-smoke.c \
+            -o /tmp/vmp-interpreter-bounds-smoke
+          /tmp/vmp-interpreter-bounds-smoke
+
+      - name: Compile embedded interpreter bitcode and inspect inlining
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          "$CC" \
+            -O2 -emit-llvm -c \
+            -target x86_64-pc-windows-msvc \
+            aVMPInterpreter/aVMPInterpreter.c \
+            -o /tmp/aVMPInterpreter.bc
+          "$LLVM_DIS" /tmp/aVMPInterpreter.bc -o /tmp/aVMPInterpreter.ll
+          grep -q '@code_seg_size' /tmp/aVMPInterpreter.ll
+          grep -q '@data_seg_size' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_fault' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_integrity_key0' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_block_end' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_steps_remaining' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_call_depth' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_frame_active' /tmp/aVMPInterpreter.ll
+          grep -q 'llvm.trap' /tmp/aVMPInterpreter.ll
+          awk '/define .*@vm_interpreter\(/,/^}/' \
+            /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed|vm_enter_block|vm_consume_budget)' \
+            /tmp/vm_interpreter.ll
+
+      - name: Verify checked-in embedded interpreter
+        shell: bash
+        run: |
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          python3 tools/check-vmp-embed.py
+          "$LLVM_DIS" aVMPInterpreter/aVMPInterpreter.bc \
+            -o /tmp/checked-aVMPInterpreter.ll
+          grep -q '@code_seg_size' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@data_seg_size' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_fault' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_integrity_key0' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_block_end' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_steps_remaining' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_call_depth' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_frame_active' /tmp/checked-aVMPInterpreter.ll
+          grep -q 'llvm.trap' /tmp/checked-aVMPInterpreter.ll
+          awk '/define .*@vm_interpreter\(/,/^}/' \
+            /tmp/checked-aVMPInterpreter.ll > /tmp/checked-vm_interpreter.ll
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed|vm_enter_block|vm_consume_budget)' \
+            /tmp/checked-vm_interpreter.ll
+
+      - name: Build a custom-header overlay
+        shell: bash
+        run: |
+          mkdir -p /tmp/allvm-include/llvm/Transforms /tmp/allvm-include/llvm
+          cp -R llvm/include/llvm/Transforms/Obfuscation \
+            /tmp/allvm-include/llvm/Transforms/
+          cp llvm/include/llvm/CryptoUtils.h /tmp/allvm-include/llvm/CryptoUtils.h
+
+      - name: Compile compatibility analysis
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra \
+            -Wno-unused-parameter \
+            -fsyntax-only \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+
+      - name: Build and run VMP compatibility behavior test
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core asmparser support)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wall -Wextra \
+            -Wno-unused-parameter \
+            llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp \
+            tools/vmp-compatibility-smoke.cpp \
+            "${LLVM_LDFLAGS[@]}" \
+            "${LLVM_LIBS[@]}" \
+            "${LLVM_SYSTEM_LIBS[@]}" \
+            -o /tmp/vmp-compatibility-smoke
+          /tmp/vmp-compatibility-smoke
+
+      - name: Compile legacy VMP integration
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wno-unused-function \
+            -Wno-unused-variable \
+            -Wno-unused-but-set-variable \
+            -Wno-sign-compare \
+            -Wno-deprecated-declarations \
+            -fsyntax-only \
+            llvm/lib/Transforms/Obfuscation/aVMP.cpp
+
+  windows-build-helper:
+    name: Windows build helper compile
+    runs-on: windows-latest
+    steps:
+      - name: Check out build helper
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: build.cpp
+          sparse-checkout-cone-mode: false
+
+      - name: Locate Visual Studio and compile build.cpp
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VS_INSTALL=%%i
+          if not defined VS_INSTALL exit /b 1
+          call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /c build.cpp /Fo:build-helper.obj

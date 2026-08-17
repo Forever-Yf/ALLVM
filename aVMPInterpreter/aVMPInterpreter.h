@@ -37,9 +37,15 @@ typedef unsigned long long uintptr_t;
 #define VM_FAULT_INVALID_OPCODE 5U
 #define VM_FAULT_ARITHMETIC     6U
 #define VM_FAULT_BAD_STATE      7U
+#define VM_FAULT_INTEGRITY      8U
+#define VM_FAULT_STEP_LIMIT     9U
+#define VM_FAULT_CALL_LIMIT    10U
+#define VM_FAULT_CALL_DEPTH    11U
+#define VM_FAULT_REENTRANT     12U
+#define VM_FAULT_BLOCK_RANGE   13U
 
 // Per-function VM state. aVMP.cpp replaces these declarations with globals
-// sized from the translated function before cloning the interpreter.
+// derived from the translated function before cloning the interpreter.
 extern uintptr_t data_seg_addr;
 extern uintptr_t code_seg_addr;
 extern int ip;
@@ -49,6 +55,18 @@ extern uint32_t vm_code_state;
 extern uint64_t code_seg_size;
 extern uint64_t data_seg_size;
 extern uint32_t vm_fault;
+
+// Authenticated-block metadata and execution budgets.
+extern uint64_t vm_integrity_key0;
+extern uint64_t vm_integrity_key1;
+extern uint64_t vm_block_end;
+extern uint64_t vm_step_limit;
+extern uint64_t vm_call_limit;
+extern uint64_t vm_call_depth_limit;
+extern uint64_t vm_steps_remaining;
+extern uint64_t vm_calls_remaining;
+extern uint64_t vm_call_depth;
+extern uint32_t vm_frame_active;
 
 // BinaryOperator codes
 #define BINOP_ADD       13
@@ -83,6 +101,7 @@ extern uint32_t vm_fault;
 #define ICMP_SLE    41
 
 uint32_t xorshift32(uint32_t *state);
+int vm_enter_block(uint64_t block_offset);
 uint8_t get_byte_code(void);
 uint32_t get_xorshift_seed(void);
 uint8_t get_opcode(void);

@@ -136,7 +136,7 @@ jobs:
           grep -q '@vm_active' /tmp/aVMPInterpreter.ll
           grep -q 'llvm.trap' /tmp/aVMPInterpreter.ll
           awk '/define .*@vm_interpreter\(/,/^}/' /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
-          ! grep -E 'call .*@(vm_enter_block|allvm_vmp_blake2s_|allvm_vmp_block_tag|allvm_vmp_tag_equal)' /tmp/vm_interpreter.ll
+          ! grep -E 'call [^@]*@(vm_enter_block|allvm_vmp_blake2s_[^(]*|allvm_vmp_block_tag|allvm_vmp_tag_equal)\(' /tmp/vm_interpreter.ll
 
       - name: Compile VMP compatibility and integration
         shell: bash

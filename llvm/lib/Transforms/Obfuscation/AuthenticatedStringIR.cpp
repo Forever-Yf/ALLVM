@@ -15,7 +15,6 @@
 
 #include <array>
 #include <cstdint>
-#include <initializer_list>
 
 using namespace llvm;
 
@@ -29,15 +28,13 @@ constexpr StringLiteral BlockName("__allvm_str_chacha_block_v1");
 constexpr StringLiteral XorName("__allvm_str_chacha_xor_v1");
 constexpr StringLiteral OpenName("__allvm_string_open_v1");
 
-void markRuntimeFunction(Function &F, bool NoInline = true) {
+void markRuntimeFunction(Function &F) {
   F.setLinkage(GlobalValue::PrivateLinkage);
   F.setDSOLocal(true);
   F.addFnAttr(Attribute::NoUnwind);
-  if (NoInline) {
-    F.removeFnAttr(Attribute::AlwaysInline);
-    F.addFnAttr(Attribute::NoInline);
-    F.addFnAttr(Attribute::OptimizeNone);
-  }
+  F.removeFnAttr(Attribute::AlwaysInline);
+  F.addFnAttr(Attribute::NoInline);
+  F.addFnAttr(Attribute::OptimizeNone);
   F.setMetadata("noobf", MDNode::get(F.getContext(), {}));
 }
 
@@ -49,8 +46,11 @@ Value *bytePtr(IRBuilder<> &B, Value *Base, uint64_t Offset) {
   return bytePtr(B, Base, B.getInt64(Offset));
 }
 
-Value *arrayElem(IRBuilder<> &B, AllocaInst *Array, Type *ElementTy,
-                 unsigned Index) {
+Value *bytePtr(IRBuilder<> &B, Value *Base, int Offset) {
+  return bytePtr(B, Base, static_cast<uint64_t>(Offset));
+}
+
+Value *arrayElem(IRBuilder<> &B, AllocaInst *Array, unsigned Index) {
   return B.CreateInBoundsGEP(Array->getAllocatedType(), Array,
                              {B.getInt32(0), B.getInt32(Index)});
 }
@@ -75,7 +75,6 @@ Function *createLoad32(Module &M) {
       GlobalValue::PrivateLinkage, Load32Name, M);
   markRuntimeFunction(*F);
   Argument *P = F->getArg(0);
-  P->setName("p");
   IRBuilder<> B(BasicBlock::Create(C, "entry", F));
   Value *Result = B.getInt32(0);
   for (unsigned I = 0; I < 4U; ++I) {
@@ -100,7 +99,6 @@ Function *createLoad64(Module &M) {
       GlobalValue::PrivateLinkage, Load64Name, M);
   markRuntimeFunction(*F);
   Argument *P = F->getArg(0);
-  P->setName("p");
   IRBuilder<> B(BasicBlock::Create(C, "entry", F));
   Value *Result = B.getInt64(0);
   for (unsigned I = 0; I < 8U; ++I) {
@@ -127,8 +125,6 @@ Function *createStore32(Module &M) {
   markRuntimeFunction(*F);
   Argument *P = F->getArg(0);
   Argument *V = F->getArg(1);
-  P->setName("p");
-  V->setName("v");
   IRBuilder<> B(BasicBlock::Create(C, "entry", F));
   for (unsigned I = 0; I < 4U; ++I) {
     Value *Part = I == 0 ? V : B.CreateLShr(V, B.getInt32(I * 8U));
@@ -163,7 +159,6 @@ void emitSipRound(IRBuilder<> &B, const SipAllocas &S) {
   Value *V1 = load64(B, S.V1);
   Value *V2 = load64(B, S.V2);
   Value *V3 = load64(B, S.V3);
-
   V0 = B.CreateAdd(V0, V1);
   V1 = B.CreateXor(rotl64(B, V1, 13U), V0);
   V0 = rotl64(B, V0, 32U);
@@ -174,7 +169,6 @@ void emitSipRound(IRBuilder<> &B, const SipAllocas &S) {
   V2 = B.CreateAdd(V2, V1);
   V1 = B.CreateXor(rotl64(B, V1, 17U), V2);
   V2 = rotl64(B, V2, 32U);
-
   store64(B, S.V0, V0);
   store64(B, S.V1, V1);
   store64(B, S.V2, V2);
@@ -205,11 +199,6 @@ Function *createTag(Module &M, Function *Load64) {
   Argument *K0 = AI++;
   Argument *K1 = AI++;
   Argument *Domain = AI++;
-  Record->setName("record");
-  PlainSize->setName("plain_size");
-  K0->setName("k0");
-  K1->setName("k1");
-  Domain->setName("domain");
 
   BasicBlock *Entry = BasicBlock::Create(C, "entry", F);
   BasicBlock *WordCond = BasicBlock::Create(C, "word.cond", F);
@@ -231,12 +220,10 @@ Function *createTag(Module &M, Function *Load64) {
   store64(B, S.V1, B.CreateXor(B.getInt64(0x646f72616e646f6dULL), K1));
   store64(B, S.V2, B.CreateXor(B.getInt64(0x6c7967656e657261ULL), K0));
   store64(B, S.V3, B.CreateXor(B.getInt64(0x7465646279746573ULL), K1));
-
   emitSipCompress(B, S, Domain);
-  for (unsigned Offset : {0U, 8U, 16U, 24U}) {
-    Value *Word = B.CreateCall(Load64, {bytePtr(B, Record, Offset)});
-    emitSipCompress(B, S, Word);
-  }
+  for (unsigned Offset : {0U, 8U, 16U, 24U})
+    emitSipCompress(B, S,
+                    B.CreateCall(Load64, {bytePtr(B, Record, Offset)}));
   B.CreateStore(B.getInt32(0), WordIndex);
   B.CreateBr(WordCond);
 
@@ -268,13 +255,12 @@ Function *createTag(Module &M, Function *Load64) {
       B.getInt32(ALLVM_STR_CIPHERTEXT_OFFSET),
       B.CreateMul(FullWords, B.getInt32(8)));
   Value *TailOffset = B.CreateAdd(BaseOffset, TI);
-  LoadInst *Byte = B.CreateLoad(B.getInt8Ty(),
-                                bytePtr(B, Record, B.CreateZExt(TailOffset, I64)));
+  LoadInst *Byte = B.CreateLoad(
+      B.getInt8Ty(), bytePtr(B, Record, B.CreateZExt(TailOffset, I64)));
   Byte->setAlignment(Align(1));
   Value *Shift = B.CreateMul(B.CreateZExt(TI, I64), B.getInt64(8));
   Value *Part = B.CreateShl(B.CreateZExt(Byte, I64), Shift);
-  Value *OldTail = B.CreateLoad(I64, Tail);
-  B.CreateStore(B.CreateOr(OldTail, Part), Tail);
+  B.CreateStore(B.CreateOr(B.CreateLoad(I64, Tail), Part), Tail);
   B.CreateStore(B.CreateAdd(TI, B.getInt32(1)), TailIndex);
   B.CreateBr(TailCond);
 
@@ -295,7 +281,7 @@ Function *createTag(Module &M, Function *Load64) {
 }
 
 Value *wordPtr(IRBuilder<> &B, AllocaInst *Array, unsigned Index) {
-  return arrayElem(B, Array, B.getInt32Ty(), Index);
+  return arrayElem(B, Array, Index);
 }
 
 Value *loadWord(IRBuilder<> &B, AllocaInst *Array, unsigned Index) {
@@ -359,15 +345,14 @@ Function *createBlock(Module &M, Function *Load32, Function *Store32) {
     storeWord(B, Initial, I, B.getInt32(Constants[I]));
   for (unsigned I = 0; I < 8U; ++I) {
     Value *Offset = B.getInt64(I * 4U);
-    Value *A = B.CreateCall(Load32, {bytePtr(B, KeyA, Offset)});
-    Value *KB = B.CreateCall(Load32, {bytePtr(B, KeyB, Offset)});
-    storeWord(B, Initial, 4U + I, B.CreateXor(A, KB));
+    Value *AWord = B.CreateCall(Load32, {bytePtr(B, KeyA, Offset)});
+    Value *BWord = B.CreateCall(Load32, {bytePtr(B, KeyB, Offset)});
+    storeWord(B, Initial, 4U + I, B.CreateXor(AWord, BWord));
   }
   storeWord(B, Initial, 12U, Counter);
-  for (unsigned I = 0; I < 3U; ++I) {
-    Value *Word = B.CreateCall(Load32, {bytePtr(B, Nonce, I * 4U)});
-    storeWord(B, Initial, 13U + I, Word);
-  }
+  for (unsigned I = 0; I < 3U; ++I)
+    storeWord(B, Initial, 13U + I,
+              B.CreateCall(Load32, {bytePtr(B, Nonce, I * 4U)}));
   for (unsigned I = 0; I < 16U; ++I)
     storeWord(B, X, I, loadWord(B, Initial, I));
 
@@ -431,14 +416,13 @@ Function *createXor(Module &M, Function *Block) {
 
   B.SetInsertPoint(OuterCond);
   Value *CurrentOffset = B.CreateLoad(I32, Offset);
-  Value *Done = B.CreateICmpUGE(CurrentOffset, Size);
-  B.CreateCondBr(Done, Success, CounterOk);
+  B.CreateCondBr(B.CreateICmpUGE(CurrentOffset, Size), Success, CounterOk);
 
   B.SetInsertPoint(CounterOk);
   Value *CurrentCounter = B.CreateLoad(I32, Counter);
-  Value *CounterValid = B.CreateICmpNE(CurrentCounter, B.getInt32(0));
   BasicBlock *Generate = BasicBlock::Create(C, "generate", F, InnerCond);
-  B.CreateCondBr(CounterValid, Generate, Failure);
+  B.CreateCondBr(B.CreateICmpNE(CurrentCounter, B.getInt32(0)), Generate,
+                 Failure);
 
   B.SetInsertPoint(Generate);
   Value *Remaining = B.CreateSub(Size, CurrentOffset);
@@ -543,12 +527,14 @@ Function *createOpen(Module &M, Function *Load32, Function *Load64,
   B.CreateCondBr(HeaderOK, Authenticate, Failure);
 
   B.SetInsertPoint(Authenticate);
-  Value *Stored0 = B.CreateCall(Load64, {bytePtr(B, Record, ALLVM_STR_TAG0_OFFSET)});
-  Value *Stored1 = B.CreateCall(Load64, {bytePtr(B, Record, ALLVM_STR_TAG1_OFFSET)});
+  Value *Stored0 =
+      B.CreateCall(Load64, {bytePtr(B, Record, ALLVM_STR_TAG0_OFFSET)});
+  Value *Stored1 =
+      B.CreateCall(Load64, {bytePtr(B, Record, ALLVM_STR_TAG1_OFFSET)});
   auto SplitKey64 = [&](unsigned OffsetBytes) {
-    Value *A = B.CreateCall(Load64, {bytePtr(B, KeyA, OffsetBytes)});
-    Value *KB = B.CreateCall(Load64, {bytePtr(B, KeyB, OffsetBytes)});
-    return B.CreateXor(A, KB);
+    Value *AWord = B.CreateCall(Load64, {bytePtr(B, KeyA, OffsetBytes)});
+    Value *BWord = B.CreateCall(Load64, {bytePtr(B, KeyB, OffsetBytes)});
+    return B.CreateXor(AWord, BWord);
   };
   Value *Computed0 = B.CreateCall(
       Tag, {Record, ExpectedSize, SplitKey64(32), SplitKey64(40),

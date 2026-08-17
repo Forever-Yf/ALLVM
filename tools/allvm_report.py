@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate a simple ALLVM project protection report.
+"""Generate an ALLVM protection report.
 
-This first version intentionally consumes existing ALLVM metadata instead of
-re-parsing LLVM IR. It provides a stable report format that later LLVM passes
-can populate with detailed protection counters.
+The report format is intentionally stable. Current data comes from project
+metadata; LLVM passes can later add detailed counters without changing users'
+workflows.
 """
 
 from __future__ import annotations
@@ -11,10 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 
+SCHEMA = 1
 
-def load_json(path: Path) -> dict:
+
+def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -22,44 +25,39 @@ def load_json(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-
-def build_report(project: Path) -> dict:
-    allvm = load_json(project / ".allvm" / "allvm.json")
+def build_report(project: Path) -> dict[str, Any]:
+    config = load_json(project / ".allvm" / "allvm.json")
     lock = load_json(project / ".allvm" / "allvm.lock.json")
-
     generated = lock.get("generated_files", {})
     if not isinstance(generated, dict):
         generated = {}
 
     return {
-        "schema": 1,
+        "schema": SCHEMA,
         "project": str(project),
-        "profile": allvm.get("profile", "unknown"),
+        "profile": config.get("profile", "unknown"),
         "configuration": {
-            "generate": allvm.get("generate", []),
+            "generators": config.get("generate", []),
             "lock_available": bool(lock),
         },
         "protection": {
             "strings": {
                 "status": "configured",
-                "details": "LLVM pass counters will populate protected/skipped counts",
+                "encrypted": None,
+                "skipped": None,
+                "note": "LLVM pass counters will populate runtime statistics",
             },
             "vmp": {
                 "status": "configured",
-                "details": "Function-level counters will populate after pass instrumentation",
+                "protected": None,
+                "skipped": None,
+                "note": "LLVM pass counters will populate function statistics",
             },
         },
         "artifacts": {
             "generated_files": len(generated),
         },
-        "next": [
-            "llvm pass instrumentation",
-            "protected function counters",
-            "binary size comparison",
-            "performance measurements",
-        ],
     }
-
 
 
 def main() -> int:
@@ -78,9 +76,15 @@ def main() -> int:
     print(f"Project : {report['project']}")
     print(f"Profile : {report['profile']}")
     print()
-    print("Strings : configured")
-    print("VMP     : configured")
-    print(f"Files   : {report['artifacts']['generated_files']}")
+    print("String Encryption")
+    print(f"  Status : {report['protection']['strings']['status']}")
+    print("  Counters: pending LLVM instrumentation")
+    print()
+    print("VMP")
+    print(f"  Status : {report['protection']['vmp']['status']}")
+    print("  Counters: pending LLVM instrumentation")
+    print()
+    print(f"Generated files: {report['artifacts']['generated_files']}")
     return 0
 
 

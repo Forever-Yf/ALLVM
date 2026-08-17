@@ -63,7 +63,7 @@ jobs:
           git checkout -- .github/workflows/hardening-smoke.yml
 
           git rm tools/apply-vmp-auth-budgets.py
-          git rm tools/run-vmp-auth-migration.sh
+          git rm -f tools/run-vmp-auth-migration.sh
           for stale in \
             llvm/include/llvm/Transforms/Obfuscation/vm.h.bak \
             llvm/include/llvm/Transforms/Obfuscation/vm.h.backup \

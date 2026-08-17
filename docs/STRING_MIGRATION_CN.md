@@ -1,6 +1,6 @@
 # 从旧字符串保护迁移到认证记录
 
-本清单用于将已有 ALLVM 项目从旧的可逆字符串变换迁移到当前认证记录实现。
+本清单用于将已有 ALLVM 项目从旧的可逆字符串变换迁移到当前认证记录实现。正式实现仍位于原路径 `llvm/lib/Transforms/Obfuscation/StringEncryption.cpp`，现有 Pass 名称和 `-mllvm -irobf-cse` 开关保持不变。
 
 ## 1. 更新分支和工具链
 

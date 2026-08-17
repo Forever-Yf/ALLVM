@@ -73,7 +73,7 @@ jobs:
             fi
           done
 
-          git add \
+          git add --sparse \
             README.md \
             docs/ALLVM_HARDENING.md \
             aVMPInterpreter/VMPIntegrity.h \

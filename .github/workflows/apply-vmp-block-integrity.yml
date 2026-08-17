@@ -41,6 +41,9 @@ jobs:
       - name: Decode and apply integrity patch
         shell: bash
         run: |
+          test "$(sha256sum .github/patches/vmp-integrity-00.b64 | cut -d' ' -f1)" = "58ae88c6c5ed13221f632a532e7d03d9ebf525da2f1634598202227b577e7176"
+          test "$(sha256sum .github/patches/vmp-integrity-01.b64 | cut -d' ' -f1)" = "71e421a9bb291ea6fa65f537ea5849d38716a43bd2bdb2871ae3c35b797309a0"
+          test "$(sha256sum .github/patches/vmp-integrity-02.b64 | cut -d' ' -f1)" = "1d1b15bfa05f16372848a5999b5804b4479ca42e52f3f9dab05bc47f2ba6da29"
           cat .github/patches/vmp-integrity-*.b64 > /tmp/apply-vmp-integrity.py.gz.b64
           base64 -d /tmp/apply-vmp-integrity.py.gz.b64 | gzip -d > /tmp/apply-vmp-integrity.py
           test "$(sha256sum /tmp/apply-vmp-integrity.py | cut -d' ' -f1)" = "34ce580f2452d39e69e0fe9eba5b26be963e6cd7a226c69e2ff35cfbe5d7b0ab"
@@ -146,10 +149,9 @@ jobs:
           python3 tools/check-hardening.py --compile-header
           python3 tools/check-vmp-embed.py
 
-      - name: Remove one-time workflow and commit
+      - name: Remove staged patch and commit
         shell: bash
         run: |
-          git rm .github/workflows/apply-vmp-block-integrity.yml
           git rm .github/patches/vmp-integrity-*.b64
           git add -A
           git config user.name "github-actions[bot]"

@@ -1,8 +1,8 @@
-//#include <string>
-//#include <cstdint>
-// #include <stdint.h>
-// #include <assert.h>
+#ifndef ALLVM_AVMP_INTERPRETER_H
+#define ALLVM_AVMP_INTERPRETER_H
 
+// The embedded interpreter intentionally avoids libc headers so it can be
+// compiled directly to LLVM bitcode for the target ABI.
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -38,14 +38,14 @@ typedef unsigned long long uintptr_t;
 #define VM_FAULT_ARITHMETIC     6U
 #define VM_FAULT_BAD_STATE      7U
 
-// Pointer size is dynamically initialized by the embedded interpreter. The
-// current bitcode ABI uses a 64-bit uintptr_t and is therefore restricted to
-// 64-bit targets by VMPCompatibility.cpp.
+// Per-function VM state. aVMP.cpp replaces these declarations with globals
+// sized from the translated function before cloning the interpreter.
+extern uintptr_t data_seg_addr;
+extern uintptr_t code_seg_addr;
+extern int ip;
 extern unsigned pointer_size;
-
-// Per-function VM segment metadata and fail-closed state. aVMP.cpp replaces
-// these declarations with thread-local globals sized from the translated
-// function before cloning the interpreter into the target module.
+extern uint32_t opcode_xorshift32_state;
+extern uint32_t vm_code_state;
 extern uint64_t code_seg_size;
 extern uint64_t data_seg_size;
 extern uint32_t vm_fault;
@@ -82,23 +82,29 @@ extern uint32_t vm_fault;
 #define ICMP_SLT    40
 #define ICMP_SLE    41
 
-// Functions
+uint32_t xorshift32(uint32_t *state);
+uint8_t get_byte_code(void);
+uint32_t get_xorshift_seed(void);
+uint8_t get_opcode(void);
 uint64_t unpack_code(int size);
 uint64_t unpack_data(uint64_t offset, int size);
 uint64_t unpack_addr(uint64_t address, int size);
 void pack_data(uint64_t offset, uint64_t value, int size);
 void pack_store_addr(uint64_t address, uint64_t value, int size);
 uint64_t get_value_with_size(uint8_t value_size, uint8_t value_type);
-uint64_t get_value();
-void alloca_handler();
-void load_handler();
-void store_handler();
-void binaryOperator_handler();
-void gep_handler();
-void cmp_handler();
-void cast_handler();
-void br_handler();
-void return_handler();
-void switch_handler();
+uint64_t get_value(void);
+void alloca_handler(void);
+void load_handler(void);
+void store_handler(void);
+void binaryOperator_handler(void);
+void gep_handler(void);
+void cmp_handler(void);
+void cast_handler(void);
+void br_handler(void);
+void return_handler(void);
+void switch_handler(void);
+void data_seg_clean(int return_value_off);
 extern void call_handler(uint64_t targetfunc_id);
-void vm_interpreter();
+void vm_interpreter(void);
+
+#endif // ALLVM_AVMP_INTERPRETER_H

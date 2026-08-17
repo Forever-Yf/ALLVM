@@ -20,6 +20,7 @@ on:
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
+      - "tools/check-vmp-embed.py"
       - "tools/vmp-compatibility-smoke.cpp"
       - "tools/vmp-interpreter-bounds-smoke.c"
       - ".github/workflows/hardening-smoke.yml"
@@ -44,6 +45,7 @@ on:
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
+      - "tools/check-vmp-embed.py"
       - "tools/vmp-compatibility-smoke.cpp"
       - "tools/vmp-interpreter-bounds-smoke.c"
       - ".github/workflows/hardening-smoke.yml"
@@ -69,8 +71,11 @@ jobs:
             build.cpp
             aVMPInterpreter/aVMPInterpreter.c
             aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/aVMPInterpreter.bc
+            llvm/include/llvm/Transforms/Obfuscation/vm.h
             tools/allvm-doctor.py
             tools/check-hardening.py
+            tools/check-vmp-embed.py
             tools/vmp-compatibility-smoke.cpp
             tools/vmp-interpreter-bounds-smoke.c
             llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
@@ -83,10 +88,14 @@ jobs:
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
           sparse-checkout-cone-mode: false
 
-      - name: Validate environment doctor entrypoint
+      - name: Validate Python entrypoints and embedded bitcode
         run: |
-          python3 -m py_compile tools/allvm-doctor.py
+          python3 -m py_compile \
+            tools/allvm-doctor.py \
+            tools/check-hardening.py \
+            tools/check-vmp-embed.py
           python3 tools/allvm-doctor.py --help >/dev/null
+          python3 tools/check-vmp-embed.py
 
       - name: Run hardening regression checker
         run: python3 tools/check-hardening.py --compile-header
@@ -107,10 +116,12 @@ jobs:
           sparse-checkout: |
             aVMPInterpreter/aVMPInterpreter.c
             aVMPInterpreter/aVMPInterpreter.h
+            aVMPInterpreter/aVMPInterpreter.bc
             llvm/include/llvm/CryptoUtils.h
             llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
+            tools/check-vmp-embed.py
             tools/vmp-compatibility-smoke.cpp
             tools/vmp-interpreter-bounds-smoke.c
           sparse-checkout-cone-mode: true
@@ -162,10 +173,28 @@ jobs:
           grep -q '@code_seg_size' /tmp/aVMPInterpreter.ll
           grep -q '@data_seg_size' /tmp/aVMPInterpreter.ll
           grep -q '@vm_fault' /tmp/aVMPInterpreter.ll
+          grep -q 'llvm.trap' /tmp/aVMPInterpreter.ll
           awk '/define .*@vm_interpreter\(/,/^}/' \
             /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
           ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed)' \
             /tmp/vm_interpreter.ll
+
+      - name: Verify checked-in embedded interpreter
+        shell: bash
+        run: |
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          python3 tools/check-vmp-embed.py
+          "$LLVM_DIS" aVMPInterpreter/aVMPInterpreter.bc \
+            -o /tmp/checked-aVMPInterpreter.ll
+          grep -q '@code_seg_size' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@data_seg_size' /tmp/checked-aVMPInterpreter.ll
+          grep -q '@vm_fault' /tmp/checked-aVMPInterpreter.ll
+          grep -q 'llvm.trap' /tmp/checked-aVMPInterpreter.ll
+          awk '/define .*@vm_interpreter\(/,/^}/' \
+            /tmp/checked-aVMPInterpreter.ll > /tmp/checked-vm_interpreter.ll
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed)' \
+            /tmp/checked-vm_interpreter.ll
 
       - name: Build a custom-header overlay
         shell: bash

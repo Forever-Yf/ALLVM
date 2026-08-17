@@ -6,8 +6,12 @@ on:
       - "README.md"
       - "docs/ALLVM_HARDENING.md"
       - "build.cpp"
+      - "aVMPInterpreter/aVMPInterpreter.c"
+      - "aVMPInterpreter/aVMPInterpreter.h"
+      - "aVMPInterpreter/aVMPInterpreter.bc"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/vm.h"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
@@ -17,6 +21,7 @@ on:
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
       - "tools/vmp-compatibility-smoke.cpp"
+      - "tools/vmp-interpreter-bounds-smoke.c"
       - ".github/workflows/hardening-smoke.yml"
   push:
     branches:
@@ -25,8 +30,12 @@ on:
       - "README.md"
       - "docs/ALLVM_HARDENING.md"
       - "build.cpp"
+      - "aVMPInterpreter/aVMPInterpreter.c"
+      - "aVMPInterpreter/aVMPInterpreter.h"
+      - "aVMPInterpreter/aVMPInterpreter.bc"
       - "llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h"
       - "llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/vm.h"
       - "llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp"
       - "llvm/lib/Transforms/Obfuscation/Constant*Encryption.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryption.cpp"
@@ -36,6 +45,7 @@ on:
       - "tools/allvm-doctor.py"
       - "tools/check-hardening.py"
       - "tools/vmp-compatibility-smoke.cpp"
+      - "tools/vmp-interpreter-bounds-smoke.c"
       - ".github/workflows/hardening-smoke.yml"
 
 permissions:
@@ -57,9 +67,12 @@ jobs:
             README.md
             docs/ALLVM_HARDENING.md
             build.cpp
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
             tools/allvm-doctor.py
             tools/check-hardening.py
             tools/vmp-compatibility-smoke.cpp
+            tools/vmp-interpreter-bounds-smoke.c
             llvm/include/llvm/Transforms/Obfuscation/SecureRandom.h
             llvm/include/llvm/Transforms/Obfuscation/VMPCompatibility.h
             llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
@@ -85,18 +98,21 @@ jobs:
         run: cat hardening-report.json
 
   vmp-syntax:
-    name: VMP LLVM syntax checks
+    name: VMP LLVM and runtime checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out ALLVM custom headers and VMP sources
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
+            aVMPInterpreter/aVMPInterpreter.c
+            aVMPInterpreter/aVMPInterpreter.h
             llvm/include/llvm/CryptoUtils.h
             llvm/include/llvm/Transforms/Obfuscation
             llvm/lib/Transforms/Obfuscation/aVMP.cpp
             llvm/lib/Transforms/Obfuscation/VMPCompatibility.cpp
             tools/vmp-compatibility-smoke.cpp
+            tools/vmp-interpreter-bounds-smoke.c
           sparse-checkout-cone-mode: true
 
       - name: Locate the newest installed LLVM toolchain
@@ -113,6 +129,43 @@ jobs:
           echo "LLVM_CONFIG=$LLVM_CONFIG" >> "$GITHUB_ENV"
           echo "LLVM_BINDIR=$($LLVM_CONFIG --bindir)" >> "$GITHUB_ENV"
           "$LLVM_CONFIG" --version
+
+      - name: Build and run native VMP interpreter bounds test
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang || command -v cc)"; fi
+          "$CC" \
+            -std=c11 \
+            -Wall -Wextra -Werror \
+            -Wno-unused-function \
+            -Wno-unused-variable \
+            -Wno-unused-parameter \
+            -Wno-strict-aliasing \
+            tools/vmp-interpreter-bounds-smoke.c \
+            -o /tmp/vmp-interpreter-bounds-smoke
+          /tmp/vmp-interpreter-bounds-smoke
+
+      - name: Compile embedded interpreter bitcode and inspect inlining
+        shell: bash
+        run: |
+          CC="$LLVM_BINDIR/clang"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CC" ]; then CC="$(command -v clang)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          "$CC" \
+            -O2 -emit-llvm -c \
+            -target x86_64-pc-windows-msvc \
+            aVMPInterpreter/aVMPInterpreter.c \
+            -o /tmp/aVMPInterpreter.bc
+          "$LLVM_DIS" /tmp/aVMPInterpreter.bc -o /tmp/aVMPInterpreter.ll
+          grep -q '@code_seg_size' /tmp/aVMPInterpreter.ll
+          grep -q '@data_seg_size' /tmp/aVMPInterpreter.ll
+          grep -q '@vm_fault' /tmp/aVMPInterpreter.ll
+          awk '/define .*@vm_interpreter\(/,/^}/' \
+            /tmp/aVMPInterpreter.ll > /tmp/vm_interpreter.ll
+          ! grep -E 'call .*@(get_byte_code|get_xorshift_seed|unpack_code|unpack_data|pack_data|vm_set_fault|vm_range_valid|vm_set_ip|vm_fail_closed)' \
+            /tmp/vm_interpreter.ll
 
       - name: Build a custom-header overlay
         shell: bash

@@ -37,8 +37,9 @@ concurrency:
 
 jobs:
   python39-compatibility:
-    name: Python 3.9 CLI compatibility
+    name: Python 3.9 CLI, sync and Gradle compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,20 +54,52 @@ jobs:
         with:
           python-version: "3.9"
       - name: Compile and exercise public entrypoints
+        shell: bash
         run: |
           python -m py_compile allvm.py tools/allvm.py tools/allvm-doctor.py
           python allvm.py --version
           sh allvm.sh profile list
-          python tools/allvm.py render --profile compat --format cmake > /tmp/compat.cmake
-          python tools/allvm.py render --profile balanced --format ndk-build > /tmp/balanced.mk
-          python tools/allvm.py render --profile strong --format json > /tmp/strong.json
+
+          python tools/allvm.py render --profile compat --format cmake \
+            > /tmp/compat.cmake
+          python tools/allvm.py render --profile balanced --format ndk-build \
+            > /tmp/balanced.mk
+          python tools/allvm.py render --profile balanced --format gradle-kts \
+            > /tmp/allvm.gradle.kts
+          python tools/allvm.py render --profile balanced --format gradle-groovy \
+            > /tmp/allvm.gradle
+          python tools/allvm.py render --profile strong --format json \
+            > /tmp/strong.json
+
           grep -q 'allvm_apply' /tmp/compat.cmake
           grep -q 'LOCAL_CFLAGS' /tmp/balanced.mk
+          grep -q 'setNdkPath' /tmp/allvm.gradle.kts
+          grep -q 'ndkPath' /tmp/allvm.gradle
           grep -q 'irobf-vmp-max-runtime-steps' /tmp/strong.json
 
+          project="$(mktemp -d)"
+          python allvm.py init \
+            --directory "$project" \
+            --profile balanced \
+            --build-system both \
+            --gradle both
+          python allvm.py sync --directory "$project" --check
+          test -f "$project/.allvm/allvm.lock.json"
+          test -f "$project/.allvm/allvm.gradle.kts"
+          test -f "$project/.allvm/allvm.gradle"
+
+          printf 'stale\n' > "$project/.allvm/allvm-options.cmake"
+          if python allvm.py sync --directory "$project" --check; then
+            echo "sync --check unexpectedly accepted a stale generated file" >&2
+            exit 1
+          fi
+          python allvm.py sync --directory "$project"
+          python allvm.py sync --directory "$project" --check
+
   linux-regression:
-    name: Linux CLI and isolated NDK regression
+    name: Linux CLI, project sync and isolated NDK regression
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,17 +115,22 @@ jobs:
         with:
           python-version: "3.13"
       - name: Run standard-library regression suite
+        shell: bash
         run: |
           python -m py_compile allvm.py tools/allvm.py tools/test-allvm-cli.py
           python allvm.py profile list --json > /tmp/profiles.json
           sh allvm.sh render --profile balanced --format shell > /tmp/flags.txt
+          python allvm.py render --profile balanced --format gradle-kts \
+            > /tmp/allvm.gradle.kts
           grep -q 'balanced' /tmp/profiles.json
           grep -q 'irobf-fla' /tmp/flags.txt
+          grep -q 'ALLVM_NDK_HOME' /tmp/allvm.gradle.kts
           python tools/test-allvm-cli.py
 
   windows-regression:
-    name: Windows CLI and isolated NDK regression
+    name: Windows CLI, project sync and isolated NDK regression
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,6 +152,10 @@ jobs:
           python -m py_compile allvm.py tools/allvm.py tools/test-allvm-cli.py
           python allvm.py --version
           cmd /c allvm.cmd profile list
-          ./allvm.ps1 render --profile compat --format json | Out-File -Encoding utf8 $env:RUNNER_TEMP\compat.json
+          ./allvm.ps1 render --profile compat --format json |
+            Out-File -Encoding utf8 $env:RUNNER_TEMP\compat.json
+          ./allvm.ps1 render --profile balanced --format gradle-kts |
+            Out-File -Encoding utf8 $env:RUNNER_TEMP\allvm.gradle.kts
           Select-String -Path $env:RUNNER_TEMP\compat.json -Pattern '"profile": "compat"'
+          Select-String -Path $env:RUNNER_TEMP\allvm.gradle.kts -Pattern 'setNdkPath'
           python tools/test-allvm-cli.py

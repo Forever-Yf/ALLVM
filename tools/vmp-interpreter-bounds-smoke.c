@@ -2,6 +2,8 @@
 //
 // Compiles the interpreter directly into this translation unit so the tests
 // exercise the same helpers that are emitted into the embedded bitcode.
+// The suite also pins the translator/interpreter opcode ordinal contract
+// across duplicate xorshift low bytes and the reserved NOP encoding.
 // VMP_TEST_NO_TRAP keeps fail-closed faults observable instead of trapping.
 //
 //===----------------------------------------------------------------------===//

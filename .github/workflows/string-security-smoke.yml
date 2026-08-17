@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/StringEncryption.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated*.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
@@ -17,6 +18,7 @@ on:
       - "security/**"
     paths:
       - "llvm/include/llvm/Transforms/Obfuscation/AuthenticatedString*.h"
+      - "llvm/include/llvm/Transforms/Obfuscation/StringEncryption.h"
       - "llvm/lib/Transforms/Obfuscation/AuthenticatedString*.cpp"
       - "llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated*.cpp"
       - "llvm/lib/Transforms/Obfuscation/CMakeLists.txt"
@@ -35,7 +37,7 @@ concurrency:
 
 jobs:
   linux-runtime:
-    name: Linux primitives, generated runtime and pass integration
+    name: Linux primitives, generated runtime and complete pass
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,9 +49,13 @@ jobs:
             llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp
             llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
             llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp
+            llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp
+            llvm/lib/Transforms/Obfuscation/LicenseManager.cpp
+            llvm/lib/Transforms/Obfuscation/ObfuscationOptions.cpp
             llvm/lib/Transforms/Obfuscation/CMakeLists.txt
             tools/string-crypto-smoke.cpp
             tools/string-runtime-ir-smoke.cpp
+            tools/string-pass-smoke.cpp
           sparse-checkout-cone-mode: true
 
       - name: Locate the newest installed LLVM toolchain
@@ -143,6 +149,45 @@ jobs:
           ! grep -q '^  StringEncryptionAuthenticated.cpp$' llvm/lib/Transforms/Obfuscation/CMakeLists.txt
           grep -q 'StringEncryptionAuthenticatedV2.cpp' \
             llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticated.cpp
+
+      - name: Execute the complete pass output with global constructors
+        shell: bash
+        run: |
+          CXX="$LLVM_BINDIR/clang++"
+          LLI="$LLVM_BINDIR/lli"
+          LLVM_DIS="$LLVM_BINDIR/llvm-dis"
+          if [ ! -x "$CXX" ]; then CXX="$(command -v clang++ || command -v c++)"; fi
+          if [ ! -x "$LLI" ]; then LLI="$(command -v lli)"; fi
+          if [ ! -x "$LLVM_DIS" ]; then LLVM_DIS="$(command -v llvm-dis)"; fi
+          read -r -a LLVM_CXXFLAGS <<< "$($LLVM_CONFIG --cxxflags)"
+          read -r -a LLVM_LDFLAGS <<< "$($LLVM_CONFIG --ldflags)"
+          read -r -a LLVM_LIBS <<< "$($LLVM_CONFIG --libs core bitwriter support transformutils)"
+          read -r -a LLVM_SYSTEM_LIBS <<< "$($LLVM_CONFIG --system-libs)"
+          "$CXX" \
+            -I/tmp/allvm-include \
+            "${LLVM_CXXFLAGS[@]}" \
+            -std=c++17 \
+            -Wno-unused-parameter \
+            -Wno-deprecated-declarations \
+            -Wno-sign-compare \
+            llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp \
+            llvm/lib/Transforms/Obfuscation/StringEncryptionAuthenticatedV2.cpp \
+            llvm/lib/Transforms/Obfuscation/CryptoUtils.cpp \
+            llvm/lib/Transforms/Obfuscation/LicenseManager.cpp \
+            llvm/lib/Transforms/Obfuscation/ObfuscationOptions.cpp \
+            tools/string-pass-smoke.cpp \
+            "${LLVM_LDFLAGS[@]}" \
+            "${LLVM_LIBS[@]}" \
+            "${LLVM_SYSTEM_LIBS[@]}" \
+            -o /tmp/string-pass-smoke
+          ALLVM_BUILD_SEED=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+            /tmp/string-pass-smoke /tmp/string-pass.bc
+          "$LLI" /tmp/string-pass.bc
+          "$LLVM_DIS" /tmp/string-pass.bc -o /tmp/string-pass.ll
+          grep -q '@__allvm_authenticated_string_table' /tmp/string-pass.ll
+          grep -q '@__allvm_open_authenticated_strings' /tmp/string-pass.ll
+          grep -q '@__allvm_wipe_decrypted_strings' /tmp/string-pass.ll
+          ! grep -q 'c"hello\\00"' /tmp/string-pass.ll
 
   windows-primitives:
     name: Windows authenticated record vectors

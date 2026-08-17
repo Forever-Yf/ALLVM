@@ -98,7 +98,7 @@ jobs:
             -Illvm/include \
             "${LLVM_CXXFLAGS[@]}" \
             -std=c++17 \
-            -Wall -Wextra -Werror \
+            -Wall -Wextra -Werror -Wno-unused-parameter \
             llvm/lib/Transforms/Obfuscation/AuthenticatedStringIR.cpp \
             tools/string-runtime-ir-smoke.cpp \
             "${LLVM_LDFLAGS[@]}" \
@@ -132,4 +132,4 @@ jobs:
           if not defined VS_INSTALL exit /b 1
           call "%VS_INSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           cl /nologo /std:c++17 /EHsc /W4 /WX /utf-8 /Illvm\include tools\string-crypto-smoke.cpp /Fe:string-crypto-smoke.exe
-          string-crypto-smoke.exe
+          .\string-crypto-smoke.exe
